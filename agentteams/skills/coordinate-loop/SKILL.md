@@ -65,9 +65,9 @@ bash /root/.copaw-worker/quality-officer/skills/coordinate-loop/scripts/run.sh -
 
 ## Sequence (serial)
 
-1. @intake: `ingest-signal/scripts/run.sh <github-url>`（或 `ingest-langfuse/scripts/run.sh`）。等到 `GET /v1/cases?source_ref=` 有 Case。
+1. @intake: `ingest-signal/scripts/run.sh <github-url>`（或 `ingest-langfuse/scripts/run.sh`）。可选 `provision-langfuse`（project/OTLP/密钥引用）。等到 `GET /v1/cases?source_ref=` 有 Case。
 2. 等到 Kernel `state=investigating`（人类 CLI 确认 AcceptanceSpec）。禁止跳过。
-3. @investigator: `bind-version-snapshot`；可选 `connect-observability`、`query-langfuse $CASE_ID investigator`。
+3. @investigator: `bind-version-snapshot`；可选 `provision-langfuse`、`connect-observability`、`query-langfuse $CASE_ID investigator`。监控挂了只降级（receipt.missing），禁止伪造指标。
 4. @attribution: `attribute-skip`；可选 `query-langfuse $CASE_ID attribution`。
 5. @builder: `propose-candidate`。Never forward Builder CoT to Verifier.
 6. @verifier: `independent-verify`。隔离。Langfuse 只用 `query-langfuse $CASE_ID verifier`（eval/target）。

@@ -144,7 +144,7 @@ def probe_monitor(url: str | None, timeout: float = 5.0) -> dict[str, Any]:
     if not url:
         return {
             "connected": False,
-            "missing": ["enterprise_monitor"],
+            "missing": ["enterprise_monitor_station"],
             "summary": (
                 "No monitor MCP/URL configured; kotaemon #758 demo may skip a real station. "
                 "Do not forge metrics."
@@ -156,7 +156,7 @@ def probe_monitor(url: str | None, timeout: float = 5.0) -> dict[str, Any]:
         if response.status_code >= 500:
             return {
                 "connected": False,
-                "missing": ["enterprise_monitor_unreachable"],
+                "missing": ["enterprise_monitor_station"],
                 "summary": (
                     f"Monitor at reference URL returned {response.status_code}; "
                     "Kernel continues without forged metrics."
@@ -164,14 +164,17 @@ def probe_monitor(url: str | None, timeout: float = 5.0) -> dict[str, Any]:
             }
         return {
             "connected": True,
-            "missing": [],
-            "summary": "Monitor reachable; attach artifacts only, never raw secrets.",
+            "missing": ["enterprise_monitor_metrics"],
+            "summary": (
+                "Monitor reachable; Skill/MCP must query metrics. Kernel stores receipts only. "
+                "Do not forge metric values."
+            ),
             "status_code": response.status_code,
         }
     except Exception as exc:
         return {
             "connected": False,
-            "missing": ["enterprise_monitor_unreachable"],
+            "missing": ["enterprise_monitor_station"],
             "summary": (
                 f"Monitor unreachable ({type(exc).__name__}); Kernel continues. "
                 "Do not forge metrics."

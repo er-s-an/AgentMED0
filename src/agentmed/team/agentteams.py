@@ -22,12 +22,13 @@ WORKER_ORDER = (
 )
 WORKER_SKILLS = {
     "quality-officer": ("coordinate-loop", "release-observe-rollback", "draft-pr"),
-    "intake": ("ingest-signal", "ingest-langfuse"),
+    "intake": ("ingest-signal", "ingest-langfuse", "provision-langfuse"),
     "investigator": (
         "bind-version-snapshot",
         "query-langfuse",
         "reproduce-badcase",
         "connect-observability",
+        "provision-langfuse",
     ),
     "attribution": ("query-langfuse", "attribute-skip"),
     "builder": ("propose-candidate",),

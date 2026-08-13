@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Fetch Langfuse traces via Kernel (Kernel holds keys). Never invent spans.
+# Investigator/Attribution: POST EvidenceReceipt when missing.
+# Verifier: eval/target only; print NEEDS_CONTEXT; do not POST evidence.
 # Usage: scripts/run.sh $CASE_ID [investigator|attribution|verifier]
 set -euo pipefail
 KERNEL="${AGENTMED_KERNEL_URL:-http://host.docker.internal:8088}"
@@ -24,14 +26,29 @@ if [ -z "${AGENTMED_PRINCIPAL:-}" ]; then
 else
   PRINCIPAL="$AGENTMED_PRINCIPAL"
 fi
-# Verifier must only receive eval/target traces — Kernel filters by role=.
 python3 - "$KERNEL" "$PRINCIPAL" "$CASE_ID" "$ROLE" <<'PY'
 import json, sys, urllib.error, urllib.parse, urllib.request
 
 kernel, principal, case_id, role = sys.argv[1:]
+write_receipt = role in {"investigator", "attribution"}
 
 
-def post_missing(reason: str) -> dict:
+def missing_payload(reason, receipt=None):
+    body = {
+        "needs_context": True,
+        "status": "NEEDS_CONTEXT",
+        "role": role,
+        "traces": [],
+        "missing": ["target_app_langfuse_traces"],
+        "reason": reason,
+        "note": "Do not invent spans. Verifier must never see Builder chain-of-thought.",
+    }
+    if receipt is not None:
+        body["receipt"] = receipt
+    return body
+
+
+def post_evidence(reason: str) -> dict:
     missing = ["target_app_langfuse_traces"]
     body = json.dumps(
         {
@@ -55,14 +72,7 @@ def post_missing(reason: str) -> dict:
             receipt = json.loads(resp.read().decode() or "{}")
     except Exception as exc:
         receipt = {"kernel_post_error": str(exc), "missing": missing}
-    return {
-        "needs_context": True,
-        "role": role,
-        "traces": [],
-        "missing": missing,
-        "receipt": receipt,
-        "note": "Do not invent spans. Verifier must never see Builder chain-of-thought.",
-    }
+    return missing_payload(reason, receipt)
 
 
 qs = urllib.parse.urlencode({"role": role})
@@ -76,23 +86,20 @@ try:
     with urllib.request.urlopen(req, timeout=30) as resp:
         payload = json.loads(resp.read().decode() or "{}")
 except urllib.error.HTTPError as exc:
-    print(json.dumps(post_missing(f"Kernel langfuse-traces HTTP {exc.code}"), ensure_ascii=False))
+    reason = f"Kernel langfuse-traces HTTP {exc.code}"
+    print(json.dumps(post_evidence(reason) if write_receipt else missing_payload(reason), ensure_ascii=False))
     sys.exit(0)
 except urllib.error.URLError as exc:
-    print(json.dumps(post_missing(f"Kernel unreachable: {exc}"), ensure_ascii=False))
+    reason = f"Kernel unreachable: {exc}"
+    print(json.dumps(post_evidence(reason) if write_receipt else missing_payload(reason), ensure_ascii=False))
     sys.exit(0)
 
 needs = bool(payload.get("needs_context"))
 traces = payload.get("traces") or payload.get("spans") or []
 if needs or not traces:
-    print(
-        json.dumps(
-            post_missing(payload.get("summary") or "Langfuse traces missing or empty; needs_context"),
-            ensure_ascii=False,
-        )
-    )
+    reason = payload.get("summary") or payload.get("reason") or "Langfuse traces missing or empty; needs_context"
+    print(json.dumps(post_evidence(reason) if write_receipt else missing_payload(reason), ensure_ascii=False))
     sys.exit(0)
 
 print(json.dumps(payload, ensure_ascii=False))
 PY
-echo

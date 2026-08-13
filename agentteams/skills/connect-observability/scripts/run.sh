@@ -116,4 +116,3 @@ print(
     )
 )
 PY
-echo

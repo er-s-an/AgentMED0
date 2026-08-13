@@ -224,6 +224,45 @@ def _pick_langfuse_eval(
     }
 
 
+def _redact_bundle_for_verifier(bundle: dict[str, Any]) -> dict[str, Any]:
+    """Verifier may see sealed files + eval evidence, never Builder CoT or audit chatter."""
+    redacted = dict(bundle)
+    redacted.pop("audit", None)
+    candidates = []
+    for item in bundle.get("candidates") or []:
+        if not isinstance(item, dict):
+            continue
+        candidates.append(
+            {
+                "id": item.get("id"),
+                "digest": item.get("digest"),
+                "files": item.get("files") or {},
+                "summary": item.get("summary"),
+            }
+        )
+    redacted["candidates"] = candidates
+    evidence = []
+    for item in bundle.get("evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        cleaned = dict(item)
+        arts = []
+        for art in item.get("artifacts") or []:
+            if not isinstance(art, dict):
+                continue
+            if _is_builder_item(art):
+                continue
+            art_clean = dict(art)
+            for key in ("input", "output", "prompt", "completion", "generation", "cot", "chain_of_thought"):
+                art_clean.pop(key, None)
+            arts.append(art_clean)
+        cleaned["artifacts"] = arts
+        evidence.append(cleaned)
+    redacted["evidence"] = evidence
+    redacted["note"] = "Builder chain-of-thought is withheld from verifier export."
+    return redacted
+
+
 def _case_verified(kernel: Kernel, case: dict[str, Any]) -> bool:
     if case.get("verified_candidate_id"):
         verified = kernel.store.get("verified_candidates", case["verified_candidate_id"])
@@ -488,31 +527,38 @@ def evidence_langfuse(
     kernel = _kernel()
     traces = traces_payload.get("traces") or []
     missing = list(traces_payload.get("missing") or [])
+    note = "Never forge spans. Never copy Builder chain-of-thought to Verifier."
+    # Verifier may read sanitized traces but must not write investigator EvidenceReceipts.
+    persist = principal in {ROLE_PRINCIPALS["investigator"], ROLE_PRINCIPALS["attribution"], ROLE_PRINCIPALS["lead"]}
     if traces_payload.get("needs_context") or not traces:
-        receipt = kernel.add_evidence(
-            principal=principal,
-            case_id=body.case_id,
-            kind="langfuse_traces",
-            summary="Langfuse traces missing or unreachable; NEEDS_CONTEXT. Do not forge spans.",
-            artifacts=[],
-            missing=missing or ["target_app_langfuse_traces"],
-        )
+        receipt = None
+        if persist:
+            receipt = kernel.add_evidence(
+                principal=principal,
+                case_id=body.case_id,
+                kind="langfuse_traces",
+                summary="Langfuse traces missing or unreachable; NEEDS_CONTEXT. Do not forge spans.",
+                artifacts=[],
+                missing=missing or ["target_app_langfuse_traces"],
+            )
         return {
             "status": "NEEDS_CONTEXT",
             "needs_context": True,
             "evidence": receipt,
             "traces": [],
-            "note": "Never forge spans. Never copy Builder chain-of-thought to Verifier.",
+            "note": note,
         }
-    receipt = kernel.add_evidence(
-        principal=principal,
-        case_id=body.case_id,
-        kind="langfuse_traces",
-        summary=f"Langfuse traces ({len(traces)}) for {principal}",
-        artifacts=[{"type": "langfuse_trace", "id": item.get("id"), "name": item.get("name")} for item in traces],
-        missing=[],
-    )
-    return {"status": "ok", "needs_context": False, "traces": traces, "evidence": receipt}
+    receipt = None
+    if persist:
+        receipt = kernel.add_evidence(
+            principal=principal,
+            case_id=body.case_id,
+            kind="langfuse_traces",
+            summary=f"Langfuse traces ({len(traces)}) for {principal}",
+            artifacts=[{"type": "langfuse_trace", "id": item.get("id"), "name": item.get("name")} for item in traces],
+            missing=[],
+        )
+    return {"status": "ok", "needs_context": False, "traces": traces, "evidence": receipt, "note": note}
 
 
 @app.post("/v1/langfuse/provision")
@@ -844,8 +890,14 @@ def get_case(case_id: str) -> dict:
 
 
 @app.get("/v1/cases/{case_id}/evidence")
-def get_evidence(case_id: str) -> dict:
+def get_evidence(
+    case_id: str,
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict:
     try:
-        return _kernel().export_case(case_id)
+        bundle = _kernel().export_case(case_id)
     except KernelError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if x_agentmed_principal == ROLE_PRINCIPALS["verifier"]:
+        return _redact_bundle_for_verifier(bundle)
+    return bundle

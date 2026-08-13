@@ -24,9 +24,11 @@ spec:
     - Snapshot must name repo, commit, prompt/model/tool refs when known.
     - Unstable reproduction is INCONCLUSIVE, not a fake pass.
     - Langfuse outage → NEEDS_CONTEXT; never forge spans.
+    - provision-langfuse once per app: project/OTLP/key *references* only, never print secrets.
     - connect-observability is optional; on skip write receipt.missing, do not forge metrics.
   skills:
     - bind-version-snapshot
     - query-langfuse
     - reproduce-badcase
     - connect-observability
+    - provision-langfuse

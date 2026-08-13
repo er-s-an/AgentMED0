@@ -1,7 +1,6 @@
 ---
 name: langfuse
 description: Interact with Langfuse and access its documentation. Use when needing to (1) query or modify Langfuse data programmatically via the CLI — traces, prompts, datasets, scores, sessions, and any other API resource, (2) look up Langfuse documentation, concepts, integration guides, or SDK usage, or (3) understand how any Langfuse feature works. This skill covers CLI-based API access (via npx) and multiple documentation retrieval methods.
-assign_when: Investigator or Attribution needs official Langfuse CLI/docs. AgentMED workers still query via Kernel HTTP proxies and must not put master keys in Worker SOUL.
 allowed-tools:
   - WebFetch(domain:langfuse.com)
   - Bash(curl *langfuse.com/*)
@@ -145,43 +144,3 @@ When the user expresses that something about this skill is not working as expect
 **Do NOT trigger this** for issues with Langfuse itself (the product) — only for issues with this skill's instructions and behavior.
 
 When triggered, follow the process in [references/skill-feedback.md](references/skill-feedback.md).
-
-## AgentMED pack (thin wrappers)
-
-This official skill is vendored for CLI/docs. AgentMED workers must use Kernel proxies so they do not hold master keys.
-
-### How to run (AgentMED)
-
-```bash
-bash scripts/run.sh            # POST /v1/langfuse/provision
-bash scripts/run.sh "$CASE_ID" # GET /v1/cases/{id}/langfuse-traces
-```
-
-### 输入 / 输出
-
-- Inputs: Kernel URL, principal, optional CASE_ID. Keys stay on Kernel host `.env`.
-- Outputs: provision refs or sanitized traces. Never raw master keys.
-
-### 调用条件
-
-Need Langfuse CLI/docs or to confirm Kernel proxy health. Quality-loop query/ingest uses `query-langfuse` / `ingest-langfuse` / `provision-langfuse`.
-
-### 依赖
-
-Official `langfuse-cli` (npx) for humans; Kernel HTTP for Copaw workers.
-
-### 失败处理
-
-Kernel returns `NEEDS_CONTEXT` if Langfuse is down. Do not forge traces.
-
-### 安全边界
-
-Do not paste `LANGFUSE_SECRET_KEY` into Worker SOUL or chat. Verifier must never load Builder CoT from traces.
-
-### 复用价值
-
-Single official skill; AgentMED wrappers stay thin.
-
-### 哪个 Agent 使用
-
-Investigator / Attribution as reference. Verifier uses `query-langfuse` only (eval/target). Builder must not export CoT.

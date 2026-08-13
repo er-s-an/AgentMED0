@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi.testclient import TestClient
 
 from agentmed.adapters.langfuse import LangfuseUnavailable
@@ -121,7 +123,7 @@ def test_connect_observability_missing_receipt(tmp_path, monkeypatch) -> None:
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "degraded"
-    assert "enterprise_monitor" in body["evidence"]["missing"]
+    assert "enterprise_monitor_station" in body["evidence"]["missing"]
     assert body["evidence"]["integrity"] == "partial"
 
 
@@ -161,6 +163,102 @@ def test_verifier_context_withholds_builder_cot(tmp_path, monkeypatch) -> None:
     assert "lightrag_store_py" not in payload
     assert "withheld" in payload["note"].lower() or "chain-of-thought" in payload["note"].lower()
     assert payload["files"]["lightrag_store.py"].startswith("class LightRAGStore")
+
+
+def test_verifier_cannot_post_generic_evidence(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    case_id = _open_case(client)
+    refused = client.post(
+        f"/v1/cases/{case_id}/evidence",
+        headers={"X-AgentMED-Principal": ROLE_PRINCIPALS["verifier"]},
+        json={
+            "kind": "langfuse_traces",
+            "summary": "verifier must not use generic evidence POST",
+            "artifacts": [{"input": "builder cot"}],
+            "missing": [],
+        },
+    )
+    assert refused.status_code == 403
+
+
+def test_verifier_langfuse_evidence_omits_builder_cot(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    case_id = _open_case(client)
+    monkeypatch.setattr(
+        "agentmed.adapters.langfuse.fetch_langfuse",
+        lambda **_kwargs: {
+            "scores": [],
+            "traces": [
+                {
+                    "id": "tr-builder",
+                    "name": "builder.propose",
+                    "tags": ["builder"],
+                    "metadata": {"role": "builder"},
+                    "input": "SECRET_BUILDER_COT",
+                    "output": "do not leak",
+                },
+                {
+                    "id": "tr-eval",
+                    "name": "kotaemon.query",
+                    "tags": ["eval", "target_app"],
+                    "metadata": {"role": "target_app"},
+                },
+            ],
+        },
+    )
+    posted = client.post(
+        "/v1/evidence/langfuse",
+        headers={"X-AgentMED-Principal": ROLE_PRINCIPALS["verifier"]},
+        json={"case_id": case_id, "role": "verifier"},
+    )
+    assert posted.status_code == 200, posted.text
+    body = posted.json()
+    assert "SECRET_BUILDER_COT" not in json.dumps(body)
+    assert "do not leak" not in json.dumps(body)
+    ids = {item.get("id") for item in body.get("traces") or []}
+    assert "tr-builder" not in ids
+    assert "tr-eval" in ids
+
+
+def test_get_evidence_redacts_builder_fields_for_verifier(tmp_path, monkeypatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    case_id = _open_case(client)
+    client.post(
+        f"/v1/cases/{case_id}/accept",
+        headers={"X-AgentMED-Principal": "human:cli"},
+        json={},
+    )
+    client.post(
+        f"/v1/cases/{case_id}/investigate",
+        headers={"X-AgentMED-Principal": ROLE_PRINCIPALS["investigator"]},
+    )
+    client.post(
+        f"/v1/cases/{case_id}/attribute",
+        headers={"X-AgentMED-Principal": ROLE_PRINCIPALS["attribution"]},
+        json={},
+    )
+    client.post(
+        f"/v1/cases/{case_id}/candidates",
+        headers={"X-AgentMED-Principal": ROLE_PRINCIPALS["builder"]},
+        json={
+            "summary": "scope by file_id",
+            "diff": "SECRET_BUILDER_REASONING",
+            "lightrag_store_py": "class LightRAGStore:\n    pass\n",
+        },
+    )
+    as_lead = client.get(f"/v1/cases/{case_id}/evidence")
+    assert as_lead.status_code == 200
+    assert "SECRET_BUILDER_REASONING" in json.dumps(as_lead.json().get("candidates") or [])
+    as_verifier = client.get(
+        f"/v1/cases/{case_id}/evidence",
+        headers={"X-AgentMED-Principal": ROLE_PRINCIPALS["verifier"]},
+    )
+    assert as_verifier.status_code == 200
+    payload = as_verifier.json()
+    assert "audit" not in payload
+    assert "SECRET_BUILDER_REASONING" not in json.dumps(payload.get("candidates") or [])
+    assert "withheld" in payload["note"].lower() or "chain-of-thought" in payload["note"].lower()
+    assert payload["candidates"][0]["files"]["lightrag_store.py"].startswith("class LightRAGStore")
 
 
 def test_sanitize_traces_drops_builder_for_verifier() -> None:

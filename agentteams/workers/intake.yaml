@@ -25,9 +25,11 @@ spec:
   agents: |
     - Prefer GitHub Issue URLs for MVP (kotaemon #758 is the first path).
     - Langfuse low-score / failed eval traces are a second Signal source (ingest-langfuse).
+    - provision-langfuse confirms project/OTLP/key references; never print secret values.
     - Feishu ingest is reserved; do not pretend it ran.
     - Same source digest must not open a second Case.
     - Unreachable Langfuse → NEEDS_CONTEXT; never invent title/body.
   skills:
     - ingest-signal
     - ingest-langfuse
+    - provision-langfuse

@@ -1,12 +1,12 @@
 ---
 name: query-langfuse
-description: GET Kernel langfuse-traces for a Case role. If needs_context, POST evidence missing. Never invent spans. Verifier must not see Builder CoT.
+description: GET Kernel langfuse-traces for a Case role. Investigator/Attribution POST EvidenceReceipt when missing. Verifier never POSTs evidence and never sees Builder CoT.
 assign_when: Investigator, Attribution, or Verifier wants traces and must not invent them.
 ---
 
 # query-langfuse
 
-通过 **Kernel** 读 Langfuse（Kernel 持有密钥）。Worker 不要直接用官方 SDK 去翻密钥。官方 Langfuse skill 在 `agentteams/skills/langfuse/`，本 skill 只做 Case 角色过滤查询。
+通过 **Kernel** 读 Langfuse（Kernel 持有密钥）。Worker 不要直接用官方 SDK 去翻密钥。官方 Langfuse skill 在 `agentteams/skills/langfuse/`（未改写的 vendor 文档/CLI），本 skill 只做 Case 角色过滤查询。
 
 **Verifier 永远不能看到 Builder chain-of-thought。** 角色必须原样传给 Kernel：`role=verifier` 只允许 eval/target traces。
 
@@ -21,7 +21,8 @@ kotaemon #758 Attribution 优先 `attribute-skip/scripts/run.sh`，不要做析�
 ## 输出
 
 - 有 traces：Kernel JSON（spans/traces）
-- 缺失：`needs_context: true` + POST evidence `missing: ["target_app_langfuse_traces"]`，traces 为空数组
+- 缺失：`needs_context: true`，traces 为空数组
+- Investigator / Attribution 额外：`EvidenceReceipt`（`missing: ["target_app_langfuse_traces"]`）
 
 ## 调用条件
 
@@ -30,12 +31,14 @@ kotaemon #758 Attribution 优先 `attribute-skip/scripts/run.sh`，不要做析�
 ## 依赖
 
 - `GET /v1/cases/{id}/langfuse-traces?role=...`
-- 失败时 `POST /v1/cases/{id}/evidence`
+- Investigator / Attribution 失败时 `POST /v1/cases/{id}/evidence`
 - 密钥在 Kernel / Langfuse，不在 Worker 聊天里
 
 ## 失败处理
 
-- HTTP 失败、空 traces、`needs_context` → POST missing evidence，**不编造 spans**，exit 0
+- HTTP 失败、空 traces、`needs_context` → **不编造 spans**，exit 0
+- Investigator / Attribution：POST `EvidenceReceipt`
+- Verifier：只打印 `NEEDS_CONTEXT`，**禁止** POST evidence
 - 不要把 Builder CoT 或候选推理转给 Verifier
 
 ## 安全边界
@@ -48,7 +51,7 @@ Verifier 工具面：eval/target only。禁止把 Builder 房间、diff 推理�
 
 ## 哪个 Agent
 
-- Investigator、Attribution：诊断 traces
+- Investigator、Attribution：诊断 traces 并写收据
 - **Verifier**：仅 eval/target；不得用于读取 Builder 过程
 
 ## 脚本
