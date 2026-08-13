@@ -59,6 +59,8 @@ def test_first_party_skills_have_contract_and_run_sh() -> None:
         for needle in REQUIRED_SUBSTRINGS:
             assert needle in text, f"{skill.name} SKILL.md missing {needle!r}"
         assert script.is_file(), f"missing {script}"
+        body = script.read_text(encoding="utf-8")
+        assert body.startswith("#!"), f"{script} needs a shebang"
         if os.name != "nt":
             mode = script.stat().st_mode
             assert mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH), f"{script} is not executable"
@@ -70,14 +72,12 @@ def test_first_party_skills_have_contract_and_run_sh() -> None:
             poll_text = poll.read_text(encoding="utf-8")
             assert "X-AgentMED-Principal" in poll_text, "poll.sh must send X-AgentMED-Principal"
         else:
-            assert (
-                "X-AgentMED-Principal" in body or "AGENTMED_PRINCIPAL" in body
-            ), f"{script} must mention X-AgentMED-Principal or AGENTMED_PRINCIPAL"
+            assert "X-AgentMED-Principal" in body, f"{script} must send X-AgentMED-Principal"
 
 
 def test_official_langfuse_skill_is_unmodified_vendor() -> None:
     vendor = (SKILLS / "langfuse" / "SKILL.md").read_text(encoding="utf-8")
-    assert "AgentMED pack" not in vendor
+    assert "AgentMED" not in vendor
     assert "POST /v1/langfuse/provision" not in vendor
     assert not (SKILLS / "langfuse" / "scripts" / "run.sh").exists()
 
