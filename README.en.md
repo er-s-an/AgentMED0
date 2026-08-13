@@ -4,77 +4,42 @@
 
 [![CI](https://github.com/er-s-an/AgentMED/actions/workflows/ci.yml/badge.svg)](https://github.com/er-s-an/AgentMED/actions/workflows/ci.yml)
 
-Another agent hands AgentMED a bad outcome. A person confirms what “fixed” means. A team inside investigates, patches, and checks the patch. A pass still does not ship. What you get is a `VerifiedCandidate / NOT DEPLOYED` plus an evidence pack.
+Turn one failed AI-app outcome into an independently verified fix that is not deployed (`VerifiedCandidate / NOT DEPLOYED`), plus an evidence pack. The name is a mouthful. The part after the slash is the point.
 
-The caller is an A2A peer or an agent that can run a CLI. GitHub issues, low Langfuse scores, and Feishu messages are evidence, not the front door.
+Callers are other agents (CLI or HTTP). A human confirms the acceptance spec with `--accept` — agents may file, they may not nod along. Kernel owns state. [AgentTeams](https://github.com/agentscope-ai/AgentTeams) runs the loop. Langfuse stores traces.
 
-Objects, the state machine, and acceptance checks live in [`docs/SPEC.md`](docs/SPEC.md).
+The public contract is [`agentteams/agent-card.json`](agentteams/agent-card.json): file a problem, read status, fetch evidence. The full object model is in [`docs/SPEC.md`](docs/SPEC.md).
 
-## Outside vs inside
+## Install
 
-Callers stay outside our rooms. They read [`agentteams/agent-card.json`](agentteams/agent-card.json) and do three things: file a problem, read case status, take the evidence pack. Builder and Verifier skills are not on the card.
-
-Those three calls hit Kernel HTTP and the `agentmed` CLI today. `run --signal <GitHub URL>` is a shortcut — the issue link is stored as an evidence ref. A2A `message/send` is the same contract; the JSON-RPC server is not up yet.
-
-A human only signs. `--accept` records a `human:` principal. The calling agent cannot sign for them and cannot write a Gate.
-
-Inside, three pieces stay separate:
-
-- **Kernel** (`:8088`) owns the Case, the Gate, and the audit log. An agent saying “done” does not count.
-- **AgentTeams** does the work. The Manager hands a pending Case to the quality officer; Workers take steps the Kernel allows.
-- **Langfuse** (`:3001`) keeps traces. If it is down the Case can still move. Missing data is `NEEDS_CONTEXT`; we do not invent spans.
-
-Company monitors stay out of the Kernel. The `connect-observability` skill only files an `EvidenceReceipt`.
-
-A Case looks like this:
-
-```text
-report → human confirms AcceptanceSpec → bind the version and evidence
-→ Builder submits a sealed patch → Verifier runs isolated eval
-→ on pass: VerifiedCandidate / NOT DEPLOYED
-→ local draft patch, shadow, rollback (desired / observed / receipt kept apart)
-→ Curator writes a RegressionAsset and we export the evidence
-```
-
-The Verifier needs all three: the old code still fails, the new code passes, and a known-bad patch is rejected. The quality officer does not vote the Gate through. After REJECT the Builder files a new revision; the sealed one stays sealed.
-
-Roles wake up per Case. The team is [`agentteams/team.yaml`](agentteams/team.yaml); skills are under [`agentteams/skills/`](agentteams/skills/README.md). Every call sends `X-AgentMED-Principal`. Builder and Verifier cannot see each other’s rooms (`denyPeerMentions`).
-
-| Who | Job |
-|---|---|
-| Intake | Turn a report into a Signal / Case |
-| Quality officer | Dispatch from Kernel state; never write that state |
-| Investigator | Bind the version, collect evidence |
-| Attribution | Only claim what can be falsified; skip if the issue already names the cause |
-| Builder | Smallest patch; no `eval/`, no self-verify |
-| Verifier | Frozen tests only, then a GateReport |
-| Kernel | State changes and authorized draft-PR / shadow / rollback |
-
-## The first governed failure
-
-[kotaemon #758](https://github.com/Cinnamon/kotaemon/issues/758): the user selected file A, LightRAG still mixed in file B. Commit `ffe766f24d4ef8a91f8c61871d2b5a1930aa204e`.
-
-We do not run the full kotaemon UI. The failure is reproduced under `workloads/kotaemon-lightrag-scope/`. Tests live in `eval/`; the Builder cannot see them. The snapshot still points at the real repo, commit, and issue.
-
-The live path is a real AgentTeams cluster. The in-repo playbook and golden-patch path do not count as a successful run.
-
-## Run it
+Python 3.11+ (3.13 preferred) and Docker. A live run also needs a Step Plan key.
 
 ```bash
+git clone https://github.com/er-s-an/AgentMED.git
+cd AgentMED
 python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env          # STEP_API_KEY is a Step Plan key, not /v1
+cp .env.example .env
+```
+
+Set `STEP_API_KEY` in `.env`. The base URL must be `https://api.stepfun.com/step_plan/v1`, not `/v1`.
+
+```bash
 REQUIRE_LIVE=false pytest -q
 ```
 
-For a full loop, AgentTeams, Langfuse, Step Plan, Gate, and GitHub all need to be up:
+## Usage
+
+Start dependencies. `live-stack` brings up Langfuse, the Kernel (including the LLM proxy), and AgentTeams:
 
 ```bash
-./scripts/live-stack.sh       # Langfuse on :3001; applies agentteams/
+./scripts/live-stack.sh    # Langfuse on :3001; Kernel on :8088; install and apply AgentTeams
 agentmed doctor
-agentmed serve                # Kernel on :8088
+# Kernel is already on :8088; `agentmed serve` only if you skipped live-stack
 ```
+
+With `REQUIRE_LIVE=true`, `doctor` checks AgentTeams, Langfuse, Step Plan, Gate, and GitHub, and exits if any of them is down. It does not heal anything. It just points at the process on the floor.
 
 ```bash
 agentmed run --signal https://github.com/Cinnamon/kotaemon/issues/758 --accept
@@ -82,22 +47,95 @@ agentmed case show CASE_ID
 agentmed evidence export CASE_ID
 ```
 
-`run` hands the work to the AgentTeams Manager and waits on the Kernel Case. `evidence export` writes a manifest, not a chat log. The CLI entrypoint is `agentmed` → `agentmed.cli:app`.
+`run` hands the Case to AgentTeams and waits on the Kernel. AgentTeams model calls go through Kernel `POST /v1/chat/completions` so prompts land in Langfuse (`GET /v1/governance/prompts` is the static catalog). `evidence export` writes a JSON manifest. Do not merge or `git push` the governed repo.
 
-With `REQUIRE_LIVE=true`, `doctor` checks those five dependencies and fails if any of them is down.
+The current workload is [kotaemon #758](https://github.com/Cinnamon/kotaemon/issues/758): the user picked file A, the answer also read file B. We reproduce that one trick, not the rest of the product. Code is in `workloads/kotaemon-lightrag-scope/`.
 
-## Don’t
+## Layout
 
-No merge, no `git push` of the governed repo, no pretending this is a production release. Local patches, a shadow apply plus rollback, and a human `--accept` are fine.
+```text
+src/agentmed/           Kernel, CLI, HTTP
+agentteams/             team, workers, skills, agent-card.json
+workloads/              evaluation adapters
+docs/SPEC.md            objects and state machine
+```
 
-Keep secrets as references. Workers do not hold a GitHub PAT or the model master key. Do not commit `.env`.
+| Command / path | What it does |
+|---|---|
+| `agentmed run --signal URL` | File a problem and run the loop |
+| `agentmed case show ID` | Read the Case |
+| `agentmed evidence export ID` | Export evidence |
+| `POST /v1/signals/ingest` | Same, over HTTP |
+| `GET /v1/cases/{id}` | Status |
+| `GET /v1/governance/prompts` | AgentMED role prompt catalog (audit) |
+| `GET /v1/governance/traces` | AgentMED’s own LLM calls (Verifier does not see Builder CoT) |
 
-Out of scope for now: the full kotaemon product, live Feishu, multi-tenant, AgentLoop as a dependency, auto-promoting a candidate to production.
+A2A JSON-RPC is not served yet. The contract is on the table. The door goes up later.
 
-Langfuse is the review plane. OTEL is the interchange format; we can export to AgentLoop later.
+<details>
+<summary>Setup briefing for agents (copy the whole block)</summary>
 
-## CI and license
+```text
+You are operating AgentMED (https://github.com/er-s-an/AgentMED).
+Turn one AI-app failure into VerifiedCandidate / NOT DEPLOYED plus an evidence pack.
+You are the calling agent. A human confirms the acceptance spec. Do not treat a pass as shipped.
+A chat log is not evidence, same as a screenshot is not a receipt.
 
-GitHub Actions runs `REQUIRE_LIVE=false` tests on Python 3.11 and 3.13. First-party skills need an executable `scripts/run.sh`. The official Langfuse skill stays an unmodified vendor copy. There is no deploy CD; the live stack is local Docker.
+Environment
+- macOS / Linux, Python 3.11+ (3.13 preferred), Docker Desktop
+- Work from the repo root
+- cp .env.example .env
+- Required: STEP_API_KEY (Step Plan, https://platform.stepfun.com/interface-key)
+- OPENAI_BASE_URL=https://api.stepfun.com/step_plan/v1
+- AGENTMED_MODEL=step-3.7-flash
+- Do not point a Plan key at https://api.stepfun.com/v1
+- Langfuse is ~/langfuse, UI http://localhost:3001
+  LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY are in .env.example
+- DATABASE_URL=sqlite:///./data/agentmed.db
+- KERNEL_API_HOST=127.0.0.1  KERNEL_API_PORT=8088
+- Public GitHub issues work without a token; private repos need GITHUB_TOKEN
+- Do not commit .env
 
-Apache-2.0. See `LICENSE`.
+Install and unit tests
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+REQUIRE_LIVE=false pytest -q
+
+Live loop
+./scripts/live-stack.sh
+# Langfuse :3001  admin@example.com / changeme123
+# Element http://127.0.0.1:18088
+# Gateway http://127.0.0.1:18080
+# Dashboard http://127.0.0.1:13000
+agentmed doctor
+# Kernel already on :8088 after live-stack; agentmed serve only if you skipped it
+
+File / inspect
+agentmed run --signal https://github.com/Cinnamon/kotaemon/issues/758 --accept
+agentmed case show CASE_ID
+agentmed evidence export CASE_ID
+
+HTTP (Kernel :8088, header X-AgentMED-Principal)
+POST /v1/signals/ingest          JSON {"url":"<github issue>"}   principal=agent:intake
+POST /v1/cases/{id}/accept       principal must start with human:
+GET  /v1/cases/{id}
+GET  /v1/cases/{id}/evidence
+GET  /v1/governance/prompts      principal=agent:lead (Verifier does not get Builder template bodies)
+GET  /v1/governance/traces
+
+Contract
+- Public skills in agentteams/agent-card.json: report-quality-problem, get-case-status, fetch-verified-outcome
+- Do not call internal Builder / Verifier skills
+- Do not merge or git push the governed app
+- Do not forge Langfuse spans; if data is missing, return NEEDS_CONTEXT
+- playbook / golden-patch is not a live success
+- First demo: kotaemon#758, workload=workloads/kotaemon-lightrag-scope
+- Details: docs/SPEC.md
+```
+
+</details>
+
+## License
+
+Apache-2.0. See `LICENSE`. CI runs `REQUIRE_LIVE=false` on Python 3.11 and 3.13.

@@ -4,77 +4,42 @@
 
 [![CI](https://github.com/er-s-an/AgentMED/actions/workflows/ci.yml/badge.svg)](https://github.com/er-s-an/AgentMED/actions/workflows/ci.yml)
 
-别的 Agent 把一次坏结果交给 AgentMED。人确认「怎样算修好」。里面一队 Agent 去查、改、验。验过了也不自动上线，只交出一份带证据的修复候选：`VerifiedCandidate / NOT DEPLOYED`。
+把 AI 应用的一次失败收成经过独立验证、默认不上线的修复候选（`VerifiedCandidate / NOT DEPLOYED`），并留下证据包。名字有点长，斜杠后面那半句才是重点。
 
-来报案的是 A2A 对端，或会跑命令的 Agent。GitHub Issue、Langfuse 低分、飞书消息都只是证据，不是入口。
+调用方是别的 Agent（CLI 或 HTTP）。人用 `--accept` 确认验收标准——Agent 可以报案，不能替人点头。状态在 Kernel，执行在 [AgentTeams](https://github.com/agentscope-ai/AgentTeams)，trace 在 Langfuse。
 
-对象、状态机和验收写在 [`docs/SPEC.md`](docs/SPEC.md)。
+对外合同见 [`agentteams/agent-card.json`](agentteams/agent-card.json)：报案、查状态、取证据。完整说明在 [`docs/SPEC.md`](docs/SPEC.md)。
 
-## 外面怎么叫，里面怎么跑
+## 安装
 
-外面的 Agent 不进我们的房间。它们读 [`agentteams/agent-card.json`](agentteams/agent-card.json)，只做三件事：报案、查状态、取走证据包。Builder / Verifier 的能力不写在 Card 上。
-
-这三件事今天打到 Kernel HTTP 和 `agentmed` CLI。`run --signal <GitHub URL>` 只是图省事，Issue 链接按证据引用收。A2A 的 `message/send` 和 Card 是同一份合同，进程上还没挂 JSON-RPC。
-
-人的位置只有签字：`--accept` 记 `human:`，报案的 Agent 不能代签，也不能写 Gate。
-
-里面三块分开：
-
-- **Kernel**（`:8088`）记 Case、过 Gate、写审计。Agent 自报不算数。
-- **AgentTeams** 干活。Manager 把待办交给质量官，Worker 按 Kernel 允许的步骤走。
-- **Langfuse**（`:3001`）留 trace。它挂了 Case 还能往下走，缺的证据标 `NEEDS_CONTEXT`，不要编 span。
-
-企业自己的监控不进 Kernel，走 `connect-observability`，只收一张 `EvidenceReceipt`。
-
-一条 Case 大致是：
-
-```text
-报案 → 人确认 AcceptanceSpec → 绑当时版本和证据
-→ Builder 交密封补丁 → Verifier 隔离评测
-→ 通过则 VerifiedCandidate / NOT DEPLOYED
-→ 本地草稿 patch、Shadow、回滚（desired / observed / receipt 分开记）
-→ 沉淀 RegressionAsset，导出 evidence
-```
-
-Verifier 要同时看到：旧代码稳定复现失败、新代码能过、故意写坏的 known-bad 过不了。质量官不投票代替 Gate。REJECT 之后只能交新 revision，不能改已经封住的那份。
-
-角色按 Case 叫起来，不必六个常驻。Team 在 [`agentteams/team.yaml`](agentteams/team.yaml)，Skill 在 [`agentteams/skills/`](agentteams/skills/README.md)，调用都带 `X-AgentMED-Principal`。Builder 和 Verifier 互相看不到对方的房间（`denyPeerMentions`）。
-
-| 谁 | 干什么 |
-|---|---|
-| Intake | 把报案收成 Signal / Case |
-| 质量官 | 按 Kernel 状态派活，不改权威状态 |
-| Investigator | 绑版本、收证据 |
-| Attribution | 能证伪再下结论；Issue 里根因写明了就可以跳过 |
-| Builder | 最小补丁；不碰 `eval/`，不自验 |
-| Verifier | 只跑冻结测试，写 GateReport |
-| Kernel | 改状态、跑已授权的草稿 PR / Shadow / 回滚 |
-
-## 现在用来演示的那条
-
-[kotaemon #758](https://github.com/Cinnamon/kotaemon/issues/758)：用户只选了 file A，LightRAG 仍混进 file B。commit 是 `ffe766f24d4ef8a91f8c61871d2b5a1930aa204e`。
-
-整站 UI 我们没跑。复现放在 `workloads/kotaemon-lightrag-scope/`，测试在 `eval/`，Builder 拿不到测试文件。Snapshot 仍指向 kotaemon 的仓库、commit 和 Issue。
-
-Live 路径是真实 AgentTeams。仓库里的 playbook / golden-patch 不算跑通。
-
-## 怎么跑
+需要 Python 3.11+（推荐 3.13）、Docker。Live 还要 Step Plan key。
 
 ```bash
+git clone https://github.com/er-s-an/AgentMED.git
+cd AgentMED
 python3.13 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env          # STEP_API_KEY 用 Step Plan，不要填 /v1
+cp .env.example .env
+```
+
+编辑 `.env`，填 `STEP_API_KEY`。Base URL 必须是 `https://api.stepfun.com/step_plan/v1`，不要用 `/v1`。
+
+```bash
 REQUIRE_LIVE=false pytest -q
 ```
 
-要跑通一整条，先把 AgentTeams、Langfuse、Step Plan、Gate、GitHub 都拉起来：
+## 用法
+
+先起依赖。`live-stack` 会拉起 Langfuse、Kernel（含 LLM 代理）和 AgentTeams：
 
 ```bash
-./scripts/live-stack.sh       # Langfuse :3001，并 apply agentteams/
+./scripts/live-stack.sh    # Langfuse :3001，Kernel :8088，安装并 apply AgentTeams
 agentmed doctor
-agentmed serve                # Kernel :8088
+# Kernel 已在 :8088；只有没跑 live-stack 时才需要 agentmed serve
 ```
+
+`REQUIRE_LIVE=true` 时，`doctor` 会检查 AgentTeams、Langfuse、Step Plan、Gate、GitHub，缺一项就退出。它不治病，只告诉你哪台还没起来。
 
 ```bash
 agentmed run --signal https://github.com/Cinnamon/kotaemon/issues/758 --accept
@@ -82,22 +47,95 @@ agentmed case show CASE_ID
 agentmed evidence export CASE_ID
 ```
 
-`run` 把活交给 AgentTeams Manager，然后盯着 Kernel 的 Case。`evidence export` 写出的是 manifest，不是聊天记录。CLI 入口是 `agentmed` → `agentmed.cli:app`。
+`run` 把 Case 交给 AgentTeams，然后等 Kernel。AgentTeams 的模型调用走 Kernel `POST /v1/chat/completions`，提示词进 Langfuse（`GET /v1/governance/prompts` 是静态目录）。`evidence export` 写出 JSON manifest。不要 merge，也不要 `git push` 被治理的仓库。
 
-`REQUIRE_LIVE=true` 时 `doctor` 会查上面那五项，缺一项就失败。
+当前 workload 是 [kotaemon #758](https://github.com/Cinnamon/kotaemon/issues/758)：选了 file A，答案里混进 file B。我们只复现这一件，不陪整站一起熬。代码在 `workloads/kotaemon-lightrag-scope/`。
 
-## 别做的事
+## 结构
 
-不要 merge，不要 `git push` 被治理的仓库，不要当生产已发布。可以留本地 patch、做一次 Shadow 再滚回去、用 `--accept` 签字。
+```text
+src/agentmed/           Kernel、CLI、HTTP
+agentteams/             Team、Worker、Skill、agent-card.json
+workloads/              被治理失败的 Adapter
+docs/SPEC.md            对象和状态机
+```
 
-密钥只放引用。Worker 不拿 GitHub PAT 和模型主密钥。`.env` 不要提交。
+| 命令 / 路径 | 作用 |
+|---|---|
+| `agentmed run --signal URL` | 报案并跑闭环 |
+| `agentmed case show ID` | 读 Case |
+| `agentmed evidence export ID` | 导出证据 |
+| `POST /v1/signals/ingest` | 同上，HTTP |
+| `GET /v1/cases/{id}` | 状态 |
+| `GET /v1/governance/prompts` | AgentMED 各角色静态提示词（审核） |
+| `GET /v1/governance/traces` | AgentMED 自己的 LLM 调用（Verifier 看不到 Builder CoT） |
 
-这次也不做：kotaemon 全量、真飞书、多租户、把 AgentLoop 当依赖、自动把候选晋升上线。
+A2A JSON-RPC 还没挂到进程上。合同先印好了，门过两天再装。
 
-Langfuse 我们当审查面用。OTEL 是交换格式，以后可以再导到 AgentLoop。
+<details>
+<summary>给 Agent 的配置说明（整段复制）</summary>
 
-## CI 和许可
+```text
+你在操作 AgentMED（https://github.com/er-s-an/AgentMED）。
+把一次 AI 应用失败收成 VerifiedCandidate / NOT DEPLOYED，外加证据包。
+你是调用方 Agent。人确认验收标准。不要当已经上线。
+聊天记录不是证据，就像截图不是发票。
 
-GitHub Actions 在 Python 3.11 / 3.13 上跑 `REQUIRE_LIVE=false` 的测试。自有 skill 要有可执行的 `scripts/run.sh`；官方 Langfuse skill 保持原样。没有部署 CD，live 栈在本机 Docker。
+环境
+- macOS / Linux，Python 3.11+（推荐 3.13），Docker Desktop
+- 仓库根目录工作
+- cp .env.example .env
+- 必填 STEP_API_KEY（Step Plan，https://platform.stepfun.com/interface-key）
+- OPENAI_BASE_URL=https://api.stepfun.com/step_plan/v1
+- AGENTMED_MODEL=step-3.7-flash
+- 不要把 Plan key 配到 https://api.stepfun.com/v1
+- Langfuse 复用 ~/langfuse，UI http://localhost:3001
+  LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY 见 .env.example
+- DATABASE_URL=sqlite:///./data/agentmed.db
+- KERNEL_API_HOST=127.0.0.1  KERNEL_API_PORT=8088
+- GitHub 公开 Issue 可不填 token；私有仓库设 GITHUB_TOKEN
+- 不要提交 .env
 
-Apache-2.0，见 `LICENSE`。
+安装与自检
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+REQUIRE_LIVE=false pytest -q
+
+Live（要跑闭环时）
+./scripts/live-stack.sh
+# Langfuse :3001  admin@example.com / changeme123
+# Element http://127.0.0.1:18088
+# Gateway http://127.0.0.1:18080
+# Dashboard http://127.0.0.1:13000
+agentmed doctor
+# Kernel already on :8088 after live-stack; agentmed serve only if you skipped it
+
+报案 / 查询
+agentmed run --signal https://github.com/Cinnamon/kotaemon/issues/758 --accept
+agentmed case show CASE_ID
+agentmed evidence export CASE_ID
+
+HTTP（Kernel :8088，Header: X-AgentMED-Principal）
+POST /v1/signals/ingest          JSON {"url":"<github issue>"}   principal=agent:intake
+POST /v1/cases/{id}/accept       principal 必须以 human: 开头
+GET  /v1/cases/{id}
+GET  /v1/cases/{id}/evidence
+GET  /v1/governance/prompts      principal=agent:lead（Verifier 看不到 Builder 模板正文）
+GET  /v1/governance/traces
+
+合同与边界
+- 外场技能见 agentteams/agent-card.json：report-quality-problem、get-case-status、fetch-verified-outcome
+- 不要调用 Builder / Verifier 的内部 skill
+- 不要 merge，不要 git push 被治理应用
+- 不要伪造 Langfuse span；没有数据就 NEEDS_CONTEXT
+- playbook / golden-patch 不算 live 成功
+- 第一条 demo：kotaemon#758，workload=workloads/kotaemon-lightrag-scope
+- 细节：docs/SPEC.md
+```
+
+</details>
+
+## 许可
+
+Apache-2.0，见 `LICENSE`。CI 在 Python 3.11 / 3.13 上跑 `REQUIRE_LIVE=false`。
