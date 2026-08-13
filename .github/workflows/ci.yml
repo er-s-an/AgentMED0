@@ -38,8 +38,10 @@ jobs:
             echo "official langfuse SKILL.md must stay vendor (no AgentMED rewrite)" >&2
             exit 1
           fi
-          for d in agentteams/skills/*; do
-            [ "$(basename "$d")" = langfuse ] && continue
+          for d in agentteams/skills/*/; do
+            name="$(basename "$d")"
+            [ "$name" = langfuse ] && continue
+            [ -d "$d" ] || continue
             [ -x "$d/scripts/run.sh" ] || { echo "missing executable $d/scripts/run.sh"; exit 1; }
             grep -q X-AgentMED-Principal "$d/scripts/"*.sh \
               || { echo "missing X-AgentMED-Principal in $d/scripts"; exit 1; }
