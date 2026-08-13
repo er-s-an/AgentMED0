@@ -1,0 +1,32 @@
+apiVersion: agentteams.io/v1beta1
+kind: Team
+metadata:
+  name: agentmed-quality
+  labels:
+    product: agentmed
+spec:
+  description: >
+    AgentMED quality loop. Manager hands new Signals / pending Cases to the
+    quality officer. The leader dispatches Kernel-legal Tasks; Workers write
+    artifacts by reference. Kernel (not Matrix chat) is source of truth.
+  heartbeatEvery: 30m
+  peerMentions: true
+  workerMembers:
+    - name: quality-officer
+      role: team_leader
+    - name: intake
+      role: worker
+    - name: investigator
+      role: worker
+    - name: attribution
+      role: worker
+    - name: builder
+      role: worker
+    - name: verifier
+      role: worker
+    - name: curator
+      role: worker
+  channelPolicy:
+    denyPeerMentions:
+      - builder
+      - verifier
