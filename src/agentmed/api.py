@@ -4,14 +4,16 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from agentmed.adapters import langfuse as langfuse_adapter
 from agentmed.adapters.github import fetch_github_issue
+from agentmed.adapters.langfuse import LangfuseUnavailable, probe_monitor, provision_refs, sanitize_traces
 from agentmed.config import load_settings
 from agentmed.gate import base_source
 from agentmed.kernel import ROLE_PRINCIPALS, Kernel, KernelError
-from agentmed.release import verify_candidate, write_shadow_and_rollback
+from agentmed.release import verify_candidate, write_draft_patch, write_shadow_and_rollback
 from agentmed.store import Store
 from agentmed.workload import (
     ATTRIBUTE_HYPOTHESIS,
@@ -28,6 +30,16 @@ load_dotenv()
 
 app = FastAPI(title="AgentMED Kernel")
 
+_BUILDER_ROLES = {"builder", "agent:builder"}
+_COT_ROLES = {"builder", "agent:builder", "verifier", "agent:verifier"}
+_TRACE_ROLES = {"investigator", "attribution", "verifier", "lead"}
+_PRINCIPAL_TO_TRACE_ROLE = {
+    ROLE_PRINCIPALS["investigator"]: "investigator",
+    ROLE_PRINCIPALS["attribution"]: "attribution",
+    ROLE_PRINCIPALS["verifier"]: "verifier",
+    ROLE_PRINCIPALS["lead"]: "lead",
+}
+
 
 def _kernel() -> Kernel:
     settings = load_settings()
@@ -41,6 +53,196 @@ def _require(principal: str | None, allowed: set[str]) -> str:
     if principal not in allowed and not (principal.startswith("human:") and "human:*" in allowed):
         raise HTTPException(status_code=403, detail=f"principal {principal} not allowed")
     return principal
+
+
+def _langfuse_needs_context(missing: str = "langfuse_traces") -> dict[str, Any]:
+    return {
+        "status": "NEEDS_CONTEXT",
+        "needs_context": True,
+        "reason": missing,
+        "missing": [missing],
+        "signal": None,
+        "case": None,
+        "signals": [],
+        "cases": [],
+    }
+
+
+def _item_roles(item: dict[str, Any]) -> set[str]:
+    roles: set[str] = set()
+    meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    role = str(meta.get("role") or item.get("role") or "").strip().lower()
+    if role:
+        roles.add(role)
+    for tag in item.get("tags") or []:
+        roles.add(str(tag).strip().lower())
+    name = str(item.get("name") or "").lower()
+    for marker in ("builder", "verifier", "investigator", "attribution"):
+        if marker in name:
+            roles.add(marker)
+    return roles
+
+
+def _is_builder_item(item: dict[str, Any]) -> bool:
+    roles = _item_roles(item)
+    return bool(roles & _BUILDER_ROLES) or "builder" in {str(x).lower() for x in (item.get("tags") or [])}
+
+
+def _is_agent_cot_item(item: dict[str, Any]) -> bool:
+    return bool(_item_roles(item) & _COT_ROLES)
+
+
+def _score_failed(score: dict[str, Any], min_score: float | None) -> bool:
+    value = score.get("value")
+    if value is None:
+        text = str(score.get("stringValue") or score.get("comment") or "").lower()
+        return any(token in text for token in ("fail", "failed", "error"))
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return False
+    threshold = 1.0 if min_score is None else min_score
+    return numeric < threshold
+
+
+def _sanitize_trace(item: dict[str, Any], *, strip_builder: bool) -> dict[str, Any] | None:
+    if strip_builder and _is_builder_item(item):
+        return None
+    cleaned = dict(item)
+    if strip_builder:
+        for key in ("input", "output", "prompt", "completion", "generation", "cot", "chain_of_thought"):
+            cleaned.pop(key, None)
+        observations = []
+        for obs in item.get("observations") or item.get("spans") or []:
+            if not isinstance(obs, dict):
+                continue
+            if _is_builder_item(obs):
+                continue
+            obs_clean = dict(obs)
+            for key in ("input", "output", "prompt", "completion", "generation", "cot", "chain_of_thought"):
+                obs_clean.pop(key, None)
+            observations.append(obs_clean)
+        if "observations" in item or "spans" in item:
+            cleaned["observations"] = observations
+            cleaned.pop("spans", None)
+    return cleaned
+
+
+def low_score_events(
+    settings,
+    min_score: float = 0.5,
+    limit: int = 50,
+    window: str | None = None,
+    failed_only: bool = True,
+    case_id: str | None = None,
+) -> list[dict[str, Any]]:
+    payload = langfuse_adapter.fetch_langfuse(
+        host=settings.langfuse_host,
+        public_key=settings.langfuse_public_key,
+        secret_key=settings.langfuse_secret_key,
+        min_score=min_score,
+        failed_only=failed_only,
+        window=window,
+        case_id=case_id,
+    )
+    scores = [item for item in (payload.get("scores") or []) if isinstance(item, dict)]
+    scores = [item for item in scores if not langfuse_adapter.is_agent_cot_item(item)]
+    if failed_only:
+        scores = [item for item in scores if _score_failed(item, min_score)]
+    return scores[:limit]
+
+
+def _query_langfuse(
+    *,
+    min_score: float | None = None,
+    failed_only: bool = True,
+    window: str | None = None,
+    case_id: str | None = None,
+) -> dict[str, Any]:
+    settings = load_settings()
+    return langfuse_adapter.fetch_langfuse(
+        host=settings.langfuse_host,
+        public_key=settings.langfuse_public_key,
+        secret_key=settings.langfuse_secret_key,
+        min_score=min_score,
+        failed_only=failed_only,
+        window=window,
+        case_id=case_id,
+    )
+
+
+def _pick_langfuse_eval(
+    payload: dict[str, Any],
+    *,
+    min_score: float | None,
+    failed_only: bool,
+) -> dict[str, Any] | None:
+    scores = [item for item in (payload.get("scores") or []) if isinstance(item, dict)]
+    traces = [item for item in (payload.get("traces") or []) if isinstance(item, dict)]
+    usable_scores = [item for item in scores if not _is_agent_cot_item(item)]
+    if failed_only:
+        usable_scores = [item for item in usable_scores if _score_failed(item, min_score)]
+    if usable_scores:
+        score = usable_scores[0]
+        source_ref = str(score.get("id") or score.get("traceId") or "").strip()
+        if not source_ref:
+            return None
+        if score.get("id"):
+            source_ref = f"langfuse:score:{score['id']}"
+        else:
+            source_ref = f"langfuse:trace:{score.get('traceId')}"
+        name = score.get("name") or "langfuse_eval"
+        value = score.get("value")
+        comment = str(score.get("comment") or "").strip()
+        title = f"Langfuse eval {name}={value}"
+        body = comment or f"Langfuse score {name} value={value} source={source_ref}"
+        return {
+            "source_ref": source_ref,
+            "title": title,
+            "body": body,
+            "raw": {
+                "score_id": score.get("id"),
+                "trace_id": score.get("traceId"),
+                "name": name,
+                "value": value,
+            },
+        }
+    usable_traces = [item for item in traces if not _is_agent_cot_item(item) and not _is_builder_item(item)]
+    if failed_only or not usable_traces:
+        return None
+    trace = usable_traces[0]
+    trace_id = str(trace.get("id") or "").strip()
+    if not trace_id:
+        return None
+    source_ref = f"langfuse:trace:{trace_id}"
+    title = str(trace.get("name") or "Langfuse trace")
+    return {
+        "source_ref": source_ref,
+        "title": title,
+        "body": f"Langfuse trace {trace_id}",
+        "raw": {"trace_id": trace_id, "name": trace.get("name")},
+    }
+
+
+def _case_verified(kernel: Kernel, case: dict[str, Any]) -> bool:
+    if case.get("verified_candidate_id"):
+        verified = kernel.store.get("verified_candidates", case["verified_candidate_id"])
+        if verified:
+            return True
+    gate_id = case.get("gate_report_id")
+    if gate_id:
+        report = kernel.store.get("gate_reports", gate_id)
+        if report and report.get("verdict") == "VERIFIED":
+            return True
+    return case.get("state") == "verified"
+
+
+def _draft_operations(kernel: Kernel, case_id: str) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in kernel.store.list("operations")
+        if item.get("case_id") == case_id and item.get("kind") == "draft_pr"
+    ]
 
 
 @app.get("/ready")
@@ -60,6 +262,30 @@ class IngestBody(BaseModel):
     expected_behavior: str | None = None
     badcase_input: str | None = None
     judge: str | None = None
+
+
+class LangfuseIngestBody(BaseModel):
+    min_score: float | None = None
+    failed_only: bool = True
+    window: str | None = None
+
+
+class EvidenceBody(BaseModel):
+    kind: str
+    summary: str
+    artifacts: list[Any] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+
+
+class ObservabilityBody(BaseModel):
+    url: str | None = None
+
+
+class LangfuseEvidenceBody(BaseModel):
+    case_id: str
+    limit: int = 50
+    name: str | None = None
+    role: str | None = None
 
 
 class AcceptBody(BaseModel):
@@ -128,6 +354,264 @@ def ingest_signal(
             "judge": body.judge or DEFAULT_JUDGE,
         },
     }
+
+
+@app.post("/v1/signals/ingest-langfuse")
+def ingest_langfuse(
+    body: LangfuseIngestBody = Body(default_factory=LangfuseIngestBody),
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    principal = _require(x_agentmed_principal, {ROLE_PRINCIPALS["intake"], ROLE_PRINCIPALS["lead"]})
+    params = body
+    try:
+        payload = _query_langfuse(
+            min_score=params.min_score,
+            failed_only=params.failed_only,
+            window=params.window,
+        )
+    except LangfuseUnavailable:
+        return _langfuse_needs_context()
+    picked = _pick_langfuse_eval(payload, min_score=params.min_score, failed_only=params.failed_only)
+    if not picked:
+        return _langfuse_needs_context()
+    kernel = _kernel()
+    app_row = kernel.ensure_app(slug="kotaemon", name="kotaemon", repo=KOTAEMON_REPO)
+    signal = kernel.ingest_signal(
+        principal=principal,
+        source_type="langfuse_eval",
+        source_ref=picked["source_ref"],
+        title=picked["title"],
+        body=picked["body"],
+        application_id=app_row["id"],
+        raw=picked["raw"],
+    )
+    case = kernel.open_case(principal=principal, signal=signal, application=app_row)
+    return {
+        "status": "ok",
+        "needs_context": False,
+        "missing": [],
+        "signal": signal,
+        "case": case,
+        "signals": [signal],
+        "cases": [case],
+    }
+
+
+@app.post("/v1/cases/{case_id}/evidence")
+def add_evidence(
+    case_id: str,
+    body: EvidenceBody,
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    principal = _require(
+        x_agentmed_principal,
+        {
+            ROLE_PRINCIPALS["investigator"],
+            ROLE_PRINCIPALS["attribution"],
+            ROLE_PRINCIPALS["lead"],
+        },
+    )
+    kernel = _kernel()
+    try:
+        kernel._case(case_id)
+        return kernel.add_evidence(
+            principal=principal,
+            case_id=case_id,
+            kind=body.kind,
+            summary=body.summary,
+            artifacts=list(body.artifacts),
+            missing=list(body.missing),
+        )
+    except KernelError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/cases/{case_id}/langfuse-traces")
+def langfuse_traces(
+    case_id: str,
+    role: str | None = None,
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    principal = _require(
+        x_agentmed_principal,
+        {
+            ROLE_PRINCIPALS["investigator"],
+            ROLE_PRINCIPALS["attribution"],
+            ROLE_PRINCIPALS["verifier"],
+            ROLE_PRINCIPALS["lead"],
+        },
+    )
+    inferred = _PRINCIPAL_TO_TRACE_ROLE.get(principal, "investigator")
+    effective_role = (role or inferred).strip().lower()
+    if effective_role not in _TRACE_ROLES:
+        raise HTTPException(status_code=400, detail="role must be investigator|attribution|verifier|lead")
+    kernel = _kernel()
+    try:
+        kernel._case(case_id)
+    except KernelError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        payload = _query_langfuse(case_id=case_id, failed_only=False)
+    except LangfuseUnavailable:
+        return {"needs_context": True, "missing": ["target_app_langfuse_traces"], "traces": []}
+    traces = [item for item in (payload.get("traces") or []) if isinstance(item, dict)]
+    strip_builder = principal == ROLE_PRINCIPALS["verifier"] or effective_role == "verifier"
+    viewer = ROLE_PRINCIPALS["verifier"] if strip_builder else principal
+    cleaned = sanitize_traces(traces, viewer)
+    if not cleaned:
+        return {
+            "status": "NEEDS_CONTEXT",
+            "needs_context": True,
+            "missing": ["target_app_langfuse_traces"],
+            "traces": [],
+        }
+    return {
+        "status": "ok",
+        "needs_context": False,
+        "missing": [],
+        "traces": cleaned,
+        "role": effective_role,
+    }
+
+
+@app.post("/v1/evidence/langfuse")
+def evidence_langfuse(
+    body: LangfuseEvidenceBody,
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    traces_payload = langfuse_traces(
+        body.case_id,
+        role=body.role,
+        x_agentmed_principal=x_agentmed_principal,
+    )
+    principal = x_agentmed_principal or ROLE_PRINCIPALS["investigator"]
+    kernel = _kernel()
+    traces = traces_payload.get("traces") or []
+    missing = list(traces_payload.get("missing") or [])
+    if traces_payload.get("needs_context") or not traces:
+        receipt = kernel.add_evidence(
+            principal=principal,
+            case_id=body.case_id,
+            kind="langfuse_traces",
+            summary="Langfuse traces missing or unreachable; NEEDS_CONTEXT. Do not forge spans.",
+            artifacts=[],
+            missing=missing or ["target_app_langfuse_traces"],
+        )
+        return {
+            "status": "NEEDS_CONTEXT",
+            "needs_context": True,
+            "evidence": receipt,
+            "traces": [],
+            "note": "Never forge spans. Never copy Builder chain-of-thought to Verifier.",
+        }
+    receipt = kernel.add_evidence(
+        principal=principal,
+        case_id=body.case_id,
+        kind="langfuse_traces",
+        summary=f"Langfuse traces ({len(traces)}) for {principal}",
+        artifacts=[{"type": "langfuse_trace", "id": item.get("id"), "name": item.get("name")} for item in traces],
+        missing=[],
+    )
+    return {"status": "ok", "needs_context": False, "traces": traces, "evidence": receipt}
+
+
+@app.post("/v1/langfuse/provision")
+def provision_langfuse(
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    _require(
+        x_agentmed_principal,
+        {
+            ROLE_PRINCIPALS["investigator"],
+            ROLE_PRINCIPALS["lead"],
+            ROLE_PRINCIPALS["intake"],
+        },
+    )
+    settings = load_settings()
+    refs = provision_refs(settings.langfuse_host, keys_configured=settings.langfuse_enabled)
+    try:
+        _query_langfuse(failed_only=False)
+        return {"status": "ok", "needs_context": False, "refs": refs}
+    except LangfuseUnavailable as exc:
+        return {
+            "status": "NEEDS_CONTEXT",
+            "needs_context": True,
+            "reason": "langfuse_unreachable",
+            "detail": str(exc),
+            "refs": refs,
+        }
+
+
+@app.post("/v1/cases/{case_id}/observability-connect")
+def observability_connect(
+    case_id: str,
+    body: ObservabilityBody | None = None,
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    principal = _require(
+        x_agentmed_principal,
+        {
+            ROLE_PRINCIPALS["investigator"],
+            ROLE_PRINCIPALS["attribution"],
+            ROLE_PRINCIPALS["lead"],
+        },
+    )
+    body = body or ObservabilityBody()
+    kernel = _kernel()
+    try:
+        kernel._case(case_id)
+    except KernelError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    probe = probe_monitor(body.url)
+    receipt = kernel.add_evidence(
+        principal=principal,
+        case_id=case_id,
+        kind="enterprise_monitor",
+        summary=str(probe["summary"]),
+        artifacts=(
+            [{"type": "monitor_probe", "url_ref": body.url or "", "connected": probe["connected"]}]
+            if body.url
+            else []
+        ),
+        missing=list(probe["missing"]),
+    )
+    return {"status": "ok" if probe["connected"] else "degraded", "probe": probe, "evidence": receipt}
+
+
+@app.post("/v1/cases/{case_id}/draft-pr")
+def draft_pr(
+    case_id: str,
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    _require(x_agentmed_principal, {ROLE_PRINCIPALS["lead"], ROLE_PRINCIPALS["controller"]})
+    settings = load_settings()
+    kernel = _kernel()
+    try:
+        case = kernel._case(case_id)
+        if not _case_verified(kernel, case):
+            raise KernelError("draft-pr requires VerifiedCandidate / VERIFIED gate")
+        existing = _draft_operations(kernel, case_id)
+        if existing:
+            return {
+                "reused": True,
+                "patch": existing[-1].get("receipt"),
+                "operations": existing,
+            }
+        candidate_id = case.get("candidate_id")
+        if not candidate_id:
+            raise KernelError("no candidate")
+        candidate = kernel.store.get("candidates", candidate_id)
+        if not candidate:
+            raise KernelError("candidate missing")
+        runtime = Path(settings.agentmed_data_dir) / "runtime" / case_id
+        drafted = write_draft_patch(kernel, case_id, candidate, runtime)
+        return {
+            "reused": False,
+            "patch": drafted["patch"],
+            "operations": [drafted["operation"]],
+        }
+    except KernelError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/v1/cases/{case_id}/accept")

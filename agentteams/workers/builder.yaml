@@ -30,5 +30,6 @@ spec:
     - Do not call independent-verify.
     - Do not touch frozen EvaluationPlan files.
     - Only agent:builder may submit candidates.
+    - Do not export Builder chain-of-thought or Langfuse CoT to Verifier.
   skills:
     - propose-candidate

@@ -1,48 +1,62 @@
 ---
 name: connect-observability
-description: Optional enterprise-monitor connector (MCP). Returns EvidenceReceipt; never part of Kernel.
-assign_when: Any Worker needs extra telemetry from an existing enterprise stack and Kernel should only store a receipt.
+description: Optional enterprise-monitor connector. Script POSTs EvidenceReceipt; on any failure records receipt.missing. Never forge metrics. Not Aliyun CMS.
+assign_when: Investigator needs extra telemetry from an existing enterprise stack; Kernel should only store a receipt.
 ---
 
 # connect-observability
 
-Execute via `agentmed` CLI / Kernel API. Matrix chat is not source of truth.
+企业监控的**通用入口**。不要操作阿里云 CMS。MCP 是扩展点。Kernel 不内嵌监控产品，只存 `EvidenceReceipt`。
 
-## Purpose
+kotaemon #758 默认路径：**未配置站点** → `missing` receipt，**exit 0**，Case 继续。
 
-Let Agents attach to **existing** enterprise monitors (not a second observability product). Kernel does not embed these systems; it only accepts `EvidenceReceipt`.
+## 输入
 
-This skill is **not** Kernel. Official review plane remains Langfuse; OTEL is the interchange; AgentLoop export is optional later.
+- `$CASE_ID`（必填）
+- 可选 `MONITOR_URL`（HTTP 健康检查）
+- 可选 `MONITOR_MCP_URL`（MCP 扩展）
+- Principal 默认 `agent:investigator`
 
-## Inputs
+## 输出
 
-- MCP / CLI equivalent for the enterprise monitor
-- `case_id` and query window
-- Credential **references** (never raw master keys in Worker soul)
+- JSON：`status`（`degraded` / `connected_no_metrics`）+ `receipt` + `missing`
+- Kernel `POST /v1/cases/{id}/evidence` 的 receipt（`kind,summary,artifacts,missing`）
 
-## Outputs
+## 调用条件
 
-- `EvidenceReceipt`
-- Degradation note if the monitor is unreachable
+GitHub + Langfuse 不够、且组织已有监控时。#758 MVP 无站点时仍要跑脚本（写 missing），不要跳过成“文档-only”。
 
-## When to call
+## 依赖
 
-When GitHub + Langfuse are not enough and the org already has monitors. Skip in the kotaemon #758 MVP if unused.
+- Kernel `POST /v1/cases/{id}/evidence`
+- 可选外部 MCP / HTTP。非 Case 推进硬依赖
 
-## Dependencies
+## 失败处理
 
-- External MCP (or CLI-equivalent contract; migrating to MCP is a protocol swap)
-- Not required for Kernel Case progress
+- 未配置 / 不可达 / 探测失败 → POST evidence，`missing` 含 `enterprise_monitor_station`（或 metrics）
+- **禁止伪造指标**
+- 降级 **exit 0**，让 Case 继续
 
-## Failure handling
+## 安全边界
 
-- Unreachable → degrade; Kernel continues
-- Do not forge metrics
+密钥只用引用。不把 Kernel 权限扩到云厂商控制台。Receipt 是证据，不是 Case 状态。禁止 Aliyun CMS 操作。
 
-## Security boundary
+## 复用价值
 
-Secrets as references only. No Kernel privilege expansion. Receipts are evidence, not Case state.
+任意企业监控（Datadog、自建 Prometheus、未来 MCP）同一入口；换厂商只换 MCP，不改 Kernel。
 
-## Which Agent uses it
+## 哪个 Agent
 
-Any **Worker** (typically Investigator). Never the Kernel / Controller as a built-in dependency.
+**Investigator**（典型）。其他 Worker 需要额外遥测时也可。不是 Kernel 内置依赖。
+
+## 脚本
+
+```bash
+bash scripts/run.sh "$CASE_ID"
+# optional:
+MONITOR_URL="http://..." MONITOR_MCP_URL="http://..." bash scripts/run.sh "$CASE_ID"
+```
+
+```bash
+bash /root/.copaw-worker/investigator/skills/connect-observability/scripts/run.sh "$CASE_ID"
+```

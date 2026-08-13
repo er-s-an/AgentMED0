@@ -21,9 +21,14 @@ WORKER_ORDER = (
     "curator",
 )
 WORKER_SKILLS = {
-    "quality-officer": ("coordinate-loop", "release-observe-rollback"),
-    "intake": ("ingest-signal",),
-    "investigator": ("bind-version-snapshot", "query-langfuse", "reproduce-badcase"),
+    "quality-officer": ("coordinate-loop", "release-observe-rollback", "draft-pr"),
+    "intake": ("ingest-signal", "ingest-langfuse"),
+    "investigator": (
+        "bind-version-snapshot",
+        "query-langfuse",
+        "reproduce-badcase",
+        "connect-observability",
+    ),
     "attribution": ("query-langfuse", "attribute-skip"),
     "builder": ("propose-candidate",),
     "verifier": ("independent-verify", "query-langfuse"),

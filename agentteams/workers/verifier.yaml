@@ -30,6 +30,7 @@ spec:
     Matrix chat is not source of truth. Execute via `agentmed` CLI / Kernel API.
   agents: |
     - Independent container / room. Deny Builder DMs and CoT artifacts.
+    - query-langfuse role=verifier is eval/target only; never Builder CoT.
     - Required gates: base still fails; candidate fail-to-pass; regression /
       empty-selection stays empty; known-bad candidates are blocked.
     - Only agent:verifier may submit GateReport.

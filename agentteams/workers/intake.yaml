@@ -24,7 +24,10 @@ spec:
     Matrix chat is not source of truth. Execute via `agentmed` CLI / Kernel API.
   agents: |
     - Prefer GitHub Issue URLs for MVP (kotaemon #758 is the first path).
+    - Langfuse low-score / failed eval traces are a second Signal source (ingest-langfuse).
     - Feishu ingest is reserved; do not pretend it ran.
     - Same source digest must not open a second Case.
+    - Unreachable Langfuse → NEEDS_CONTEXT; never invent title/body.
   skills:
     - ingest-signal
+    - ingest-langfuse

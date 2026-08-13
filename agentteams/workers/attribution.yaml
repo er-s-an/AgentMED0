@@ -24,6 +24,7 @@ spec:
   agents: |
     - query-langfuse is optional; declare absence instead of fabricating traces.
     - For kotaemon #758 run attribute-skip instead of a factorial study.
+    - Official langfuse skill is docs/CLI only; query via Kernel proxy.
   skills:
     - query-langfuse
     - attribute-skip

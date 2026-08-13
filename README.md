@@ -78,6 +78,7 @@ Apply the pack in `agentteams/`:
 - `team.yaml` — Team `agentmed-quality`, leader `quality-officer` (`role: team_leader`)
 - `workers/*.yaml` — one Worker each
 - `skills/*/SKILL.md` — reusable capabilities; effects go through Kernel HTTP
+- `skills/README.md` — official `langfuse` vs AgentMED wrappers (`provision-langfuse`, `query-langfuse`, `ingest-langfuse`)
 
 `scripts/live-stack.sh` installs a real AgentTeams cluster (controller + manager + workers) and applies `agentteams/`. Kernel owns state and Gate. AgentTeams owns execution. `agentmed doctor` fails unless AgentTeams, Langfuse, Step Plan, Gate, and GitHub intake are all live.
 

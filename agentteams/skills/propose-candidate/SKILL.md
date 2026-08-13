@@ -6,48 +6,54 @@ assign_when: Case is proposing and only agent:builder may emit a candidate.
 
 # propose-candidate
 
-Kernel: `http://host.docker.internal:8088`. Principal: `agent:builder`.
+## 输入
 
-## Steps
+- `$CASE_ID`
+- 提交时：完整 `lightrag_store.py` 路径 + 可选 summary
+- Principal：`agent:builder`
+- Kernel `GET /v1/cases/{id}/builder-context` 给出的 AcceptanceSpec + 基线源码
 
-1. Fetch context (prints buggy source + AcceptanceSpec):
+## 输出
+
+- 仅 context：buggy source + spec + 指令
+- 提交后：密封 `CandidateRevision` JSON（`id` / digest）。此后不可原地改
+
+## 调用条件
+
+Case `proposing`。只有 `agent:builder` 可提交。REJECT 后开**新** revision，不 patch 已密封候选。
+
+## 依赖
+
+- `GET .../builder-context` 与 `POST .../candidates`
+- 行为约束：`insert` 必须持久化 `file_id`；`query(file_ids=...)` 只返回匹配 chunk；空选择返回 `[]`
+
+## 失败处理
+
+- Kernel 拒绝 → 打印错误，不声称已验证
+- 禁止为了“通过”去改 eval/
+
+## 安全边界
+
+禁止跑 pytest、调用 `/verify`、读 `eval/`、宣布 VERIFIED、merge/push。不要写 GateReport。本 Worker **没有** `independent-verify`。
+
+## 复用价值
+
+最小候选提交管道；换文件时仍走同一 Kernel 密封。
+
+## 哪个 Agent
+
+**Builder only**。
+
+## 脚本
 
 ```bash
 bash scripts/run.sh "$CASE_ID"
-```
-
-2. Write `/tmp/lightrag_store.py` as a **complete file**. Required behavior:
-
-- `insert(text, file_id=None)` **must store** `file_id` on the chunk (do not `del file_id`).
-- `query(text, file_ids=None)` if `file_ids` is `None` or `[]` → return `[]`.
-- otherwise return only chunks whose `file_id` is in `file_ids`.
-
-Reference shape (you may write this):
-
-```python
-from dataclasses import dataclass, field
-
-@dataclass
-class LightRAGStore:
-    chunks: list[dict[str, str | None]] = field(default_factory=list)
-
-    def insert(self, text: str, file_id: str | None = None) -> None:
-        self.chunks.append({"text": text, "file_id": file_id})
-
-    def query(self, text: str, file_ids: list[str] | None = None) -> list[str]:
-        del text
-        if not file_ids:
-            return []
-        selected = set(file_ids)
-        return [str(chunk["text"]) for chunk in self.chunks if chunk.get("file_id") in selected]
-```
-
-3. Submit:
-
-```bash
+# then write /tmp/lightrag_store.py and:
 bash scripts/run.sh "$CASE_ID" /tmp/lightrag_store.py "persist file_id and filter query"
 ```
 
-## Forbidden
-
-Do not run pytest. Do not call `/verify`. Do not read eval/. Do not announce VERIFIED.
+```bash
+bash /root/.copaw-worker/builder/skills/propose-candidate/scripts/run.sh "$CASE_ID"
+bash /root/.copaw-worker/builder/skills/propose-candidate/scripts/run.sh \
+  "$CASE_ID" /tmp/lightrag_store.py "persist file_id and filter query"
+```

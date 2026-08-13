@@ -76,9 +76,17 @@ def write_shadow_and_rollback(kernel: Kernel, case_id: str, candidate: dict[str,
         receipt=str(target),
         status="rolled_back" if rolled == previous else "drift",
     )
+    draft = write_draft_patch(kernel, case_id, candidate, runtime_dir)
+    return {"apply": apply_op, "rollback": rollback_op, "patch": draft["patch"], "draft": draft}
+
+
+def write_draft_patch(kernel: Kernel, case_id: str, candidate: dict[str, Any], runtime_dir: Path) -> dict[str, Any]:
+    """Local draft.patch only. Never git push or merge."""
+    runtime_dir.mkdir(parents=True, exist_ok=True)
     patch_path = runtime_dir / "draft.patch"
-    patch_path.write_text(candidate.get("diff") or desired, encoding="utf-8")
-    kernel.record_operation(
+    desired = candidate.get("diff") or apply_candidate_files(candidate.get("files") or {})
+    patch_path.write_text(desired, encoding="utf-8")
+    op = kernel.record_operation(
         principal=ROLE_PRINCIPALS["controller"],
         case_id=case_id,
         kind="draft_pr",
@@ -87,4 +95,4 @@ def write_shadow_and_rollback(kernel: Kernel, case_id: str, candidate: dict[str,
         receipt=str(patch_path),
         status="drafted_not_merged",
     )
-    return {"apply": apply_op, "rollback": rollback_op, "patch": str(patch_path)}
+    return {"patch": str(patch_path), "operation": op}

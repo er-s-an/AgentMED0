@@ -33,6 +33,8 @@ spec:
     - After REJECT, require a new CandidateRevision; never patch in place.
     - Keep Builder and Verifier isolated; never forward Builder chain-of-thought.
     - After VERIFIED run release-observe-rollback yourself (principal agent:lead).
+    - draft-pr is a request for a local Kernel draft.patch; never git push or merge.
   skills:
     - coordinate-loop
     - release-observe-rollback
+    - draft-pr
