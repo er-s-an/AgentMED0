@@ -14,7 +14,7 @@ req = urllib.request.Request(
     method="POST",
 )
 try:
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=90) as resp:
         print(resp.read().decode())
 except urllib.error.HTTPError as exc:
     print(json.dumps({"status": "NEEDS_CONTEXT", "needs_context": True, "reason": f"HTTP {exc.code}", "detail": exc.read().decode()[:500]}))

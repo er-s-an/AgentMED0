@@ -4,12 +4,21 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import Body, FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from agentmed.adapters import langfuse as langfuse_adapter
 from agentmed.adapters.github import fetch_github_issue
-from agentmed.adapters.langfuse import LangfuseUnavailable, probe_monitor, provision_refs, sanitize_traces
+from agentmed.adapters.langfuse import (
+    LangfuseUnavailable,
+    partition_traces,
+    probe_monitor,
+    provision_refs,
+    sanitize_traces,
+    upsert_prompts,
+)
+from agentmed.llm_proxy import models_payload, proxy_chat
+from agentmed.prompt_catalog import catalog_summary, harvest_prompts
 from agentmed.config import load_settings
 from agentmed.gate import base_source
 from agentmed.kernel import ROLE_PRINCIPALS, Kernel, KernelError
@@ -38,6 +47,16 @@ _PRINCIPAL_TO_TRACE_ROLE = {
     ROLE_PRINCIPALS["attribution"]: "attribution",
     ROLE_PRINCIPALS["verifier"]: "verifier",
     ROLE_PRINCIPALS["lead"]: "lead",
+}
+_GOVERNANCE_READERS = {
+    ROLE_PRINCIPALS["intake"],
+    ROLE_PRINCIPALS["lead"],
+    ROLE_PRINCIPALS["investigator"],
+    ROLE_PRINCIPALS["attribution"],
+    ROLE_PRINCIPALS["curator"],
+    ROLE_PRINCIPALS["controller"],
+    ROLE_PRINCIPALS["verifier"],
+    "human:*",
 }
 
 
@@ -294,6 +313,24 @@ def health() -> dict:
     return {"kernel": "ok"}
 
 
+@app.get("/v1/models")
+@app.get("/v1/llm/models")
+def llm_models() -> dict[str, Any]:
+    return models_payload()
+
+
+@app.post("/v1/chat/completions")
+@app.post("/v1/llm/chat/completions")
+async def llm_chat_completions(request: Request) -> Any:
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="JSON body required") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    return proxy_chat(payload, {k: v for k, v in request.headers.items()})
+
+
 class IngestBody(BaseModel):
     url: str
     title: str | None = None
@@ -494,6 +531,7 @@ def langfuse_traces(
     except LangfuseUnavailable:
         return {"needs_context": True, "missing": ["target_app_langfuse_traces"], "traces": []}
     traces = [item for item in (payload.get("traces") or []) if isinstance(item, dict)]
+    traces = partition_traces(traces)["target"]
     strip_builder = principal == ROLE_PRINCIPALS["verifier"] or effective_role == "verifier"
     viewer = ROLE_PRINCIPALS["verifier"] if strip_builder else principal
     cleaned = sanitize_traces(traces, viewer)
@@ -575,9 +613,39 @@ def provision_langfuse(
     )
     settings = load_settings()
     refs = provision_refs(settings.langfuse_host, keys_configured=settings.langfuse_enabled)
+    records = harvest_prompts()
+    summary = catalog_summary(records)
+    upsert: dict[str, Any] = {
+        "status": "skipped",
+        "reason": "langfuse_keys_missing",
+        "upserted": [],
+        "failed": [],
+        "upserted_count": 0,
+        "failed_count": 0,
+    }
+    if settings.langfuse_enabled:
+        upsert = upsert_prompts(
+            host=settings.langfuse_host,
+            public_key=settings.langfuse_public_key,
+            secret_key=settings.langfuse_secret_key,
+            records=records,
+        )
+    governance = {
+        "prompt_count": summary["count"],
+        "prompt_names": summary["names"],
+        "llm_proxy": "POST /v1/chat/completions",
+        "upsert_status": upsert.get("status"),
+        "upserted_count": upsert.get("upserted_count", len(upsert.get("upserted") or [])),
+        "failed_count": upsert.get("failed_count", len(upsert.get("failed") or [])),
+    }
     try:
         _query_langfuse(failed_only=False)
-        return {"status": "ok", "needs_context": False, "refs": refs}
+        return {
+            "status": "ok",
+            "needs_context": False,
+            "refs": refs,
+            "governance": governance,
+        }
     except LangfuseUnavailable as exc:
         return {
             "status": "NEEDS_CONTEXT",
@@ -585,7 +653,85 @@ def provision_langfuse(
             "reason": "langfuse_unreachable",
             "detail": str(exc),
             "refs": refs,
+            "governance": governance,
         }
+
+
+def _is_builder_prompt(item: dict[str, Any]) -> bool:
+    blob = f"{item.get('name') or ''} {item.get('role') or ''} {item.get('source') or ''}".lower()
+    return "builder" in blob or "propose-candidate" in blob
+
+
+def _governance_prompt_rows(principal: str) -> list[dict[str, Any]]:
+    hide_builder = "verifier" in principal.lower()
+    rows: list[dict[str, Any]] = []
+    for item in harvest_prompts():
+        row = {
+            "name": item["name"],
+            "role": item["role"],
+            "kind": item["kind"],
+            "source": item["source"],
+            "tags": item.get("tags") or [],
+        }
+        if hide_builder and _is_builder_prompt(item):
+            row["prompt"] = None
+            row["redacted"] = True
+        else:
+            row["prompt"] = item["prompt"]
+            row["redacted"] = False
+        rows.append(row)
+    return rows
+
+
+@app.get("/v1/governance/prompts")
+def governance_prompts(
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    principal = _require(x_agentmed_principal, _GOVERNANCE_READERS)
+    rows = _governance_prompt_rows(principal)
+    return {
+        "status": "ok",
+        "plane": "governance",
+        "count": len(rows),
+        "names": [item["name"] for item in rows],
+        "prompts": rows,
+        "note": "Static templates from the AgentMED pack. Live LLM calls are POST /v1/chat/completions → Langfuse.",
+    }
+
+
+@app.get("/v1/governance/traces")
+def governance_traces(
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    principal = _require(x_agentmed_principal, _GOVERNANCE_READERS)
+    try:
+        payload = _query_langfuse(failed_only=False)
+    except LangfuseUnavailable as exc:
+        return {
+            "status": "NEEDS_CONTEXT",
+            "needs_context": True,
+            "missing": ["agentmed_governance_traces"],
+            "reason": str(exc),
+            "traces": [],
+        }
+    traces = [item for item in (payload.get("traces") or []) if isinstance(item, dict)]
+    traces = partition_traces(traces)["governance"]
+    cleaned = sanitize_traces(traces, principal)
+    if not cleaned:
+        return {
+            "status": "NEEDS_CONTEXT",
+            "needs_context": True,
+            "missing": ["agentmed_governance_traces"],
+            "traces": [],
+        }
+    return {
+        "status": "ok",
+        "needs_context": False,
+        "missing": [],
+        "plane": "governance",
+        "traces": cleaned,
+        "note": "Never copy Builder chain-of-thought to Verifier.",
+    }
 
 
 @app.post("/v1/cases/{case_id}/observability-connect")

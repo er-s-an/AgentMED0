@@ -41,14 +41,21 @@ class LLM:
             tool_calls = message.tool_calls or []
             content = message.content or ""
             self.obs.generation(
-                name=f"{role}.llm",
+                name=f"agentmed.{role}.llm",
                 model=self.settings.agentmed_model,
-                input_text=user if len(messages) == 2 else content,
+                input_text={"messages": messages},
                 output_text=content or str([call.function.name for call in tool_calls]),
                 usage={
                     "input": getattr(response.usage, "prompt_tokens", None),
                     "output": getattr(response.usage, "completion_tokens", None),
                 },
+                metadata={
+                    "role": role,
+                    "product": "agentmed",
+                    "plane": "governance",
+                    "source": "playbook",
+                },
+                tags=["agentmed-governance", "agentmed", role],
             )
             if not tool_calls:
                 return content

@@ -3,7 +3,7 @@
 > 状态：已确认，施工中  
 > 版本：0.1  
 > 日期：2026-08-13  
-> 仓库：`/Users/tencent_go/AgentMED`
+> 仓库：https://github.com/er-s-an/AgentMED
 
 ---
 
@@ -215,6 +215,7 @@ awaiting_acceptance
 - 所有角色 prompt 进 Prompt Management，Attempt 带 prompt version
 - 每次角色运行是一条 trace：工具、输入摘要、输出 artifact digest
 - 人类能审查「当时质量官 / 修复师用的是哪一版提示词」
+- Verifier 不得看到 Builder 思维链；静态模板与运行时 generation 都按角色打 tag
 
 ### 6.2 给其他 Agent 做诊断
 
@@ -229,7 +230,7 @@ awaiting_acceptance
 
 Langfuse 挂了：Kernel 继续工作；诊断工具返回 `NEEDS_CONTEXT`，不得伪造 span。
 
-本机可复用已有栈：`~/langfuse`，UI `http://localhost:3001`。AgentMED 自己的 Postgres 不要占用 5433。
+Live 脚本默认读 `LANGFUSE_COMPOSE`，未设置则为 `$HOME/langfuse/docker-compose.yml`，UI `http://localhost:3001`。AgentMED 自己的 Postgres 不要占用 5433。
 
 可观测对赛道是推荐项。方案写：Langfuse 为一等公民；OTEL 为交换格式；可再 export 到 AgentLoop。
 

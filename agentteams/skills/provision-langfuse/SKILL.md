@@ -16,8 +16,10 @@ AgentMED 薄封装。官方 CLI/文档 skill 在 `agentteams/skills/langfuse/`�
 
 ## 输出
 
-- 可达：JSON `status=ok` + `refs`（host / OTLP / key 环境变量名 / project 名）
-- 不可达：`status=NEEDS_CONTEXT`，`needs_context=true`，**exit 0**
+- 可达：JSON `status=ok` + `refs`（host / OTLP / key 环境变量名 / project 名）+ `governance.prompt_names`（AgentMED 各角色静态提示词目录，不含密钥）
+- 不可达：`status=NEEDS_CONTEXT`，`needs_context=true`，**exit 0**。仍可能带上本地 `governance.prompt_names`。
+
+Kernel 会把该目录 upsert 到 Langfuse Prompt Management（密钥仍只在 Kernel）。Worker 运行时的真实 messages 走 Kernel `POST /v1/chat/completions`，打 `agentmed-governance` tag。
 
 ## 调用条件
 

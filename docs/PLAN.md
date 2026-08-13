@@ -1,7 +1,7 @@
 # AgentMED 落地 Plan
 
 > 配套文档：`docs/SPEC.md`  
-> 状态：已确认，施工中。仓库 `/Users/tencent_go/AgentMED`。
+> 状态：已确认，施工中。仓库 https://github.com/er-s-an/AgentMED 。
 
 ---
 
@@ -11,7 +11,7 @@
 AgentMED/
   README.md
   pyproject.toml                 # package: agentmed, CLI: agentmed
-  docker-compose.yml             # 仅 AgentMED Postgres；Langfuse 复用 ~/langfuse
+  docker-compose.yml             # 仅 AgentMED Postgres；Langfuse 用 LANGFUSE_COMPOSE
   src/agentmed/                  # Kernel / CLI / API / team playbook
   agentteams/                    # 参赛用声明式资源
     team.yaml

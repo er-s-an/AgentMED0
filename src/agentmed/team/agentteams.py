@@ -180,11 +180,15 @@ def apply_pack(settings: Settings | None = None) -> dict[str, Any]:
             raise LiveStackError(f"agt apply team.yaml failed: {team_result.stderr or team_result.stdout}")
         applied.append("team.yaml")
     synced = sync_worker_skills(settings)
+    from agentmed.team.dispatch import retarget_agentteams_llm
+
+    llm_proxy = retarget_agentteams_llm(settings)
     workers = _run([docker, "exec", "agentteams-controller", "agt", "get", "workers"], check=False)
     return {
         "skills_dir": str(skills),
         "applied": applied,
         "synced": synced,
+        "llm_proxy": llm_proxy,
         "workers": (workers.stdout or workers.stderr).strip(),
     }
 

@@ -128,6 +128,93 @@ def fetch_langfuse(
 
 
 
+def is_governance_item(item: dict[str, Any]) -> bool:
+    tags = {str(tag).strip().lower() for tag in (item.get("tags") or [])}
+    meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    if str(meta.get("product") or "").strip().lower() == "agentmed":
+        return True
+    if str(meta.get("plane") or "").strip().lower() == "governance":
+        return True
+    name = str(item.get("name") or "").lower()
+    if name.startswith("agentmed."):
+        return True
+    return bool(tags & {"agentmed-governance", "agentmed"})
+
+
+def partition_traces(traces: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    governance: list[dict[str, Any]] = []
+    target: list[dict[str, Any]] = []
+    for item in traces:
+        if not isinstance(item, dict):
+            continue
+        if is_governance_item(item):
+            governance.append(item)
+        else:
+            target.append(item)
+    return {"governance": governance, "target": target}
+
+
+def upsert_prompts(
+    *,
+    host: str,
+    public_key: str,
+    secret_key: str,
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Create/update Langfuse Prompt Management records. Never returns secret values."""
+    if not host or not public_key or not secret_key:
+        return {
+            "status": "skipped",
+            "reason": "langfuse_keys_missing",
+            "upserted": [],
+            "failed": [],
+        }
+    base = host.rstrip("/")
+    upserted: list[str] = []
+    failed: list[str] = []
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            for record in records:
+                name = str(record.get("name") or "").strip()
+                prompt = record.get("prompt") or ""
+                if not name or not prompt:
+                    continue
+                body = {
+                    "name": name,
+                    "type": record.get("type") or "text",
+                    "prompt": prompt,
+                    "labels": list(record.get("labels") or ["production", "governance"]),
+                    "tags": list(record.get("tags") or ["agentmed", "governance"]),
+                }
+                try:
+                    response = client.post(
+                        f"{base}/api/public/v2/prompts",
+                        json=body,
+                        auth=(public_key, secret_key),
+                    )
+                    if response.status_code >= 400:
+                        failed.append(name)
+                    else:
+                        upserted.append(name)
+                except Exception:
+                    failed.append(name)
+    except Exception as exc:
+        return {
+            "status": "NEEDS_CONTEXT",
+            "reason": type(exc).__name__,
+            "upserted": upserted,
+            "failed": [item["name"] for item in records if item.get("name")],
+        }
+    status = "ok" if upserted and not failed else ("NEEDS_CONTEXT" if failed else "skipped")
+    return {
+        "status": status,
+        "upserted": upserted,
+        "failed": failed,
+        "upserted_count": len(upserted),
+        "failed_count": len(failed),
+    }
+
+
 def provision_refs(host: str, *, keys_configured: bool) -> dict[str, Any]:
     base = (host or "").rstrip("/")
     return {
@@ -137,6 +224,8 @@ def provision_refs(host: str, *, keys_configured: bool) -> dict[str, Any]:
         "secret_key_ref": "env:LANGFUSE_SECRET_KEY",
         "keys_configured": keys_configured,
         "worker_host": "http://host.docker.internal:3001",
+        "llm_proxy_ref": "http://host.docker.internal:8088/v1",
+        "prompt_management_ref": f"{base}/prompts" if base else None,
     }
 
 

@@ -19,5 +19,6 @@ Thin wrappers talk to Kernel HTTP. Workers must not hold Langfuse master keys.
 ## Boundaries
 
 - Kernel is source of truth. Langfuse is not the Case DB.
+- AgentMED's own prompts (worker soul / skills / live LLM messages) are captured for governance: static catalog via `provision-langfuse` / `GET /v1/governance/prompts`; live calls via Kernel `POST /v1/chat/completions`.
 - Verifier never gets Builder chain-of-thought (see `team.yaml` `denyPeerMentions` and `query-langfuse`).
 - **`connect-observability`** is the enterprise-monitor entry; Kernel only stores `EvidenceReceipt`. No Aliyun CMS. Nacos / cloud Skills portal are recommended, not required.

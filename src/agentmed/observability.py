@@ -57,14 +57,38 @@ class Observability:
         self,
         name: str,
         model: str,
-        input_text: str,
-        output_text: str,
+        input_text: Any,
+        output_text: Any,
         usage: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
     ) -> None:
         if not self.enabled or self.client is None:
             return
+        meta = {
+            "product": "agentmed",
+            "plane": "governance",
+            **(metadata or {}),
+        }
         try:
-            observation = self.client.start_observation(as_type="generation", name=name, model=model, input=input_text)
+            kwargs: dict[str, Any] = {
+                "as_type": "generation",
+                "name": name,
+                "model": model,
+                "input": input_text,
+                "metadata": meta,
+            }
+            if tags:
+                kwargs["tags"] = tags
+            try:
+                observation = self.client.start_observation(**kwargs)
+            except TypeError:
+                kwargs.pop("tags", None)
+                try:
+                    observation = self.client.start_observation(**kwargs)
+                except TypeError:
+                    kwargs.pop("metadata", None)
+                    observation = self.client.start_observation(**kwargs)
             observation.update(output=output_text, usage_details=usage or {})
             observation.end()
         except Exception as exc:

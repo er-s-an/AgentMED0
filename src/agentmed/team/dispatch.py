@@ -70,6 +70,67 @@ def read_manager_env() -> dict[str, str]:
     return values
 
 
+def rewrite_env_key(path: Path, key: str, value: str) -> dict[str, Any]:
+    """Replace a single env assignment. Return status only — never other secret values."""
+    if not path.exists():
+        return {"status": "missing", "changed": False, "key": key, "path": str(path)}
+    original = path.read_text(encoding="utf-8")
+    lines = original.splitlines(keepends=True)
+    found = False
+    changed = False
+    out: list[str] = []
+    assignment = f"{key}={value}"
+    for line in lines:
+        if line.startswith(f"{key}="):
+            found = True
+            current = line.split("=", 1)[1].strip()
+            newline = "\n" if line.endswith("\n") else ""
+            if current != value:
+                out.append(assignment + newline)
+                changed = True
+            else:
+                out.append(line)
+        else:
+            out.append(line)
+    if not found:
+        suffix = "" if original.endswith("\n") or not original else "\n"
+        out.append(f"{suffix}{assignment}\n")
+        changed = True
+    if changed:
+        path.write_text("".join(out), encoding="utf-8")
+    return {
+        "status": "updated" if changed else "already",
+        "changed": changed,
+        "key": key,
+        "url": value,
+        "path": str(path),
+    }
+
+
+def retarget_agentteams_llm(settings: Settings) -> dict[str, Any]:
+    """Point AgentTeams at the Kernel LLM proxy. Opt-in: AGENTMED_RETARGET_LLM=1.
+
+    Does not print secrets. Does not rewrite the file unless explicitly enabled,
+    so `apply-agentteams` on someone else's cluster is not a surprise.
+    """
+    url = f"http://host.docker.internal:{settings.kernel_api_port}/v1"
+    if os.environ.get("AGENTMED_RETARGET_LLM") != "1":
+        return {
+            "status": "skipped",
+            "changed": False,
+            "key": "AGENTTEAMS_OPENAI_BASE_URL",
+            "url": url,
+            "note": "Set AGENTMED_RETARGET_LLM=1 to rewrite AGENTTEAMS_OPENAI_BASE_URL outside this repo.",
+        }
+    result = rewrite_env_key(_env_file(), "AGENTTEAMS_OPENAI_BASE_URL", url)
+    result["restart_required"] = bool(result.get("changed"))
+    result["note"] = (
+        "Existing AgentTeams containers keep the old LLM URL until they are recreated. "
+        "Kernel holds the model API key; workers call POST /v1/chat/completions on Kernel."
+    )
+    return result
+
+
 def enable_yolo(settings: Settings) -> Path:
     marker = Path(settings.agentteams_workspace) / "yolo-mode"
     marker.parent.mkdir(parents=True, exist_ok=True)

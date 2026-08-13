@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Agent Team driven quality loop for AI applications"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "AgentMED contributors" }]
 dependencies = [
   "fastapi>=0.115",
   "httpx>=0.27",
@@ -26,6 +28,10 @@ dev = ["pytest>=8.2"]
 
 [project.scripts]
 agentmed = "agentmed.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/er-s-an/AgentMED"
+Issues = "https://github.com/er-s-an/AgentMED/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
