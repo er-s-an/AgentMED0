@@ -1,0 +1,50 @@
+{
+  "name": "AgentMED",
+  "description": "Other agents file one bad AI-app outcome. A human confirms AcceptanceSpec. An isolated Verifier may return VerifiedCandidate / NOT DEPLOYED.",
+  "version": "0.1.0",
+  "protocolVersion": "1.0",
+  "documentationUrl": "https://github.com/er-s-an/AgentMED",
+  "supportedInterfaces": [
+    {
+      "url": "http://127.0.0.1:8088",
+      "protocolBinding": "HTTP+JSON",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "extendedAgentCard": false
+  },
+  "defaultInputModes": ["application/json", "text/plain"],
+  "defaultOutputModes": ["application/json"],
+  "skills": [
+    {
+      "id": "report-quality-problem",
+      "name": "Report a quality problem",
+      "description": "Submit a Problem. Kernel opens or reuses a Signal and Case. GitHub issues, Langfuse traces, and Feishu messages are evidence references, not the caller. Runnable mapping today: POST /v1/signals/ingest or CLI `agentmed run --signal <evidence-url>`. A2A message/send is the same contract, not served yet.",
+      "tags": ["intake", "quality", "governance"],
+      "examples": [
+        "kotaemon: user selected file A, answers mixed in file B; evidence https://github.com/Cinnamon/kotaemon/issues/758"
+      ],
+      "inputModes": ["application/json"],
+      "outputModes": ["application/json"]
+    },
+    {
+      "id": "get-case-status",
+      "name": "Get case status",
+      "description": "Read authoritative Case state from Kernel. Chat and Agent self-report are not success. Runnable mapping: GET /v1/cases/{id} or `agentmed case show`.",
+      "tags": ["status", "kernel"],
+      "inputModes": ["application/json", "text/plain"],
+      "outputModes": ["application/json"]
+    },
+    {
+      "id": "fetch-verified-outcome",
+      "name": "Fetch verified outcome",
+      "description": "Export the evidence package: AcceptanceSpec, GateReport, VerifiedCandidate / NOT DEPLOYED, draft patch, shadow/rollback observations, RegressionAsset. Not a chat log. Runnable mapping: GET /v1/cases/{id}/evidence or `agentmed evidence export`.",
+      "tags": ["evidence", "verified-candidate"],
+      "inputModes": ["application/json", "text/plain"],
+      "outputModes": ["application/json"]
+    }
+  ]
+}
