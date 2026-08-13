@@ -84,7 +84,7 @@ Apply the pack in `agentteams/`:
 
 ## CI
 
-GitHub Actions runs unit tests on Python 3.11 and 3.13 with `REQUIRE_LIVE=false`. There is no deploy CD: the live stack is local Docker (AgentTeams + Langfuse + Kernel), not a hosted service.
+GitHub Actions runs unit tests and skill-script smoke tests on Python 3.11 and 3.13 with `REQUIRE_LIVE=false`. CI also checks that every first-party skill has an executable `scripts/run.sh` (Kernel HTTP + `X-AgentMED-Principal`) and that the official Langfuse skill stays an unmodified vendor copy. There is no deploy CD: the live stack is local Docker (AgentTeams + Langfuse + Kernel), not a hosted service.
 
 ## Safety (MVP)
 
