@@ -88,14 +88,32 @@ def main() -> None:
     }
     versionset_records = {}
     for vset_id, (prompt_key, kb_key, model_key) in CELL_BINDINGS.items():
+        prompt_component = components[prompt_key]
+        kb_component = components[kb_key]
+        model_component = components[model_key]
         versionset_records[vset_id] = {
             "versionset_id": vset_id,
+            # vset_cell_C (P1 故障配置) 是当前线上 active 基线；其余为实验冻结态。
+            "status": "active" if vset_id == "vset_cell_C" else "frozen",
             "digest": VSET_DIGESTS[vset_id],
             "revision": 1,
             "content": {
-                "prompt": {"digest": components[prompt_key]["digest"], "version": "v1.4.2" if prompt_key == "P0" else "v1.4.3"},
-                "kb_manifest": {"digest": components[kb_key]["digest"], "version": "1.0.0"},
-                "model": {"digest": components[model_key]["digest"], "model": components[model_key]["model"], "params": components[model_key]["params"]},
+                "prompt": {
+                    "digest": prompt_component["digest"],
+                    "prompt_id": "prompts/system.md",
+                    "version": "v1.4.2" if prompt_key == "P0" else "v1.4.3",
+                    "content": prompt_component["content"],
+                },
+                "kb_manifest": {
+                    "manifest_digest": kb_component["digest"],
+                    "version": "1.0.0",
+                    "entries": kb_component["entries"],
+                },
+                "model": {
+                    "digest": model_component["digest"],
+                    "model": model_component["model"],
+                    "params": model_component["params"],
+                },
             },
         }
     registry = {

@@ -84,11 +84,8 @@ def compose_system(prompt_component: dict[str, Any], kb_component: dict[str, Any
 
 
 def get_versionset_record(settings: Settings, versionset_id: str) -> dict[str, Any]:
-    registry = load_registry(settings)
-    record = registry.get("versionset_records", {}).get(versionset_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"versionset {versionset_id} not found in evaluate registry")
-    return record
+    """Registry cells (frozen/active) first, created repair drafts second."""
+    return _record_anywhere(settings, versionset_id)
 
 
 def provider_log_path(settings: Settings) -> Path:
@@ -140,12 +137,15 @@ def evaluate_versionset(
     """Run one probe against the exact immutable VersionSet on the real model path."""
     registry = load_registry(settings)
     cell = registry.get("cells", {}).get(versionset_id)
-    if cell is None:
-        raise HTTPException(status_code=404, detail=f"versionset {versionset_id} not in evaluate cells")
-    components = registry.get("components") or {}
-    prompt_component = components.get(cell[0])
-    kb_component = components.get(cell[1])
-    model_component = components.get(cell[2])
+    if cell is not None:
+        components = registry.get("components") or {}
+        prompt_component = components.get(cell[0])
+        kb_component = components.get(cell[1])
+        model_component = components.get(cell[2])
+    else:
+        # 修复候选（created draft）走 record content 直解；两者都不可变。
+        record = _record_anywhere(settings, versionset_id)
+        prompt_component, kb_component, model_component = _components_for_record(record)
     if prompt_component is None or kb_component is None or model_component is None:
         raise HTTPException(status_code=503, detail=f"evaluate registry missing component for {versionset_id}")
     if model_component.get("kind") != "model":
@@ -268,3 +268,160 @@ def evaluate_versionset(
         "status": status,
         "trace_id": trace_id,
     }
+
+
+# ---------- 修复候选写面（CaseLoop 段4）：created version sets ----------
+
+
+def _sha256_hex(data: bytes) -> str:
+    import hashlib as _hashlib
+
+    return _hashlib.sha256(data).hexdigest()
+
+
+def _content_digest(content: dict[str, Any]) -> str:
+    """稳定内容摘要：sha256 over sorted-JSON（仅作不可变身份，与 registry digest 解耦）。"""
+    return "sha256:" + _sha256_hex(
+        json.dumps(content, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    )
+
+
+def created_versionsets_path(settings: Settings) -> Path:
+    data_dir = Path(settings.agentmed_data_dir)
+    if not data_dir.is_absolute():
+        data_dir = REPO_ROOT / data_dir
+    return data_dir / "created_versionsets.json"
+
+
+def _lock_file(handle: Any) -> None:
+    try:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        pass
+
+
+def _unlock_file(handle: Any) -> None:
+    try:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+
+def load_created_versionsets(settings: Settings) -> dict[str, Any]:
+    path = created_versionsets_path(settings)
+    if not path.exists():
+        return {}
+    try:
+        with path.open(encoding="utf-8") as handle:
+            data = json.loads(handle.read())
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_created_versionsets(settings: Settings, store: dict[str, Any]) -> None:
+    path = created_versionsets_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+" if path.exists() else "w", encoding="utf-8") as handle:
+        handle.seek(0)
+        _lock_file(handle)
+        try:
+            handle.seek(0)
+            handle.truncate()
+            handle.write(json.dumps(store, ensure_ascii=False, indent=2, sort_keys=True))
+            handle.flush()
+        finally:
+            _unlock_file(handle)
+
+
+def _validate_created_content(content: dict[str, Any]) -> None:
+    if not isinstance(content, dict):
+        raise HTTPException(status_code=422, detail="content must be an object")
+    prompt = content.get("prompt")
+    kb = content.get("kb_manifest")
+    model = content.get("model")
+    if not isinstance(prompt, dict) or not isinstance(kb, dict) or not isinstance(model, dict):
+        raise HTTPException(status_code=422, detail="content must include prompt/kb_manifest/model objects")
+    if not isinstance(prompt.get("digest"), str) or not prompt["digest"].startswith("sha256:"):
+        raise HTTPException(status_code=422, detail="content.prompt.digest must be sha256:...")
+    if not isinstance(prompt.get("content"), str) or not prompt["content"].strip():
+        raise HTTPException(status_code=422, detail="content.prompt.content (the actual prompt text) is required")
+    if not isinstance(kb.get("manifest_digest"), str) or not kb["manifest_digest"].startswith("sha256:"):
+        raise HTTPException(status_code=422, detail="content.kb_manifest.manifest_digest must be sha256:...")
+    if not isinstance(kb.get("entries"), list):
+        raise HTTPException(status_code=422, detail="content.kb_manifest.entries must be a list")
+    if not isinstance(model.get("digest"), str) or not model["digest"].startswith("sha256:"):
+        raise HTTPException(status_code=422, detail="content.model.digest must be sha256:...")
+    if not isinstance(model.get("model"), str) or not model["model"]:
+        raise HTTPException(status_code=422, detail="content.model.model is required")
+
+
+def create_versionset(
+    settings: Settings,
+    content: dict[str, Any],
+) -> dict[str, Any]:
+    """Create an immutable draft version set from the repairer's single-variable content.
+
+    Idempotent by content digest: the same content always maps to the same
+    versionset_id.  The draft is persisted in the data dir and becomes
+    immediately evaluable through the exact-versionset evaluate surface.
+    """
+    _validate_created_content(content)
+    content_digest = _content_digest(content)
+    store = load_created_versionsets(settings)
+    for record in store.values():
+        if not isinstance(record, dict):
+            continue
+        if record.get("digest") == content_digest:
+            return record
+    versionset_id = "vs_" + _sha256_hex(content_digest.encode("utf-8"))[:16]
+    record = {
+        "versionset_id": versionset_id,
+        "status": "draft",
+        "digest": content_digest,
+        "revision": 1,
+        "content": content,
+    }
+    store[versionset_id] = record
+    save_created_versionsets(settings, store)
+    return record
+
+
+def _record_anywhere(settings: Settings, versionset_id: str) -> dict[str, Any]:
+    registry = load_registry(settings)
+    record = registry.get("versionset_records", {}).get(versionset_id)
+    if record is not None:
+        return record
+    store = load_created_versionsets(settings)
+    record = store.get(versionset_id)
+    if record is not None:
+        return record
+    raise HTTPException(status_code=404, detail=f"versionset {versionset_id} not found in evaluate registry")
+
+
+def _components_for_record(record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    content = record.get("content") or {}
+    prompt = content.get("prompt") or {}
+    kb = content.get("kb_manifest") or {}
+    model = content.get("model") or {}
+    prompt_component = {
+        "kind": "prompt",
+        "digest": prompt.get("digest"),
+        "content": prompt.get("content") or "",
+    }
+    kb_component = {
+        "kind": "kb_manifest",
+        "digest": kb.get("manifest_digest") or kb.get("digest"),
+        "entries": kb.get("entries") or [],
+    }
+    model_component = {
+        "kind": "model",
+        "digest": model.get("digest"),
+        "model": model.get("model"),
+        "params": model.get("params") or {},
+    }
+    return prompt_component, kb_component, model_component

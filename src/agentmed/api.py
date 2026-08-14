@@ -366,6 +366,25 @@ def get_versionset_endpoint(
     return get_versionset_record(settings, versionset_id)
 
 
+@app.post("/v2/versionsets")
+def create_versionset_endpoint(
+    body: dict[str, Any] = Body(...),
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict[str, Any]:
+    """CaseLoop repair-candidate write: create an immutable draft version set.
+
+    Idempotent by content digest; the draft is immediately evaluable through
+    POST /v2/versionsets/{id}/evaluate.
+    """
+    from agentmed.evaluate import create_versionset
+    from agentmed.evaluate import require_eval_token
+
+    settings = load_settings()
+    require_eval_token(settings, authorization)
+    return create_versionset(settings, body)
+
+
 @app.get("/v2/logs")
 def provider_logs_endpoint(
     request_id: str = Query(..., min_length=8),
