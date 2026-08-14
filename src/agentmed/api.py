@@ -331,6 +331,41 @@ async def llm_chat_completions(request: Request) -> Any:
     return proxy_chat(payload, {k: v for k, v in request.headers.items()})
 
 
+class EvaluateBody(BaseModel):
+    message: str
+    session_id: str | None = None
+    user_ref: str | None = None
+
+
+@app.post("/v2/versionsets/{versionset_id}/evaluate")
+def evaluate_versionset_endpoint(
+    versionset_id: str,
+    body: EvaluateBody,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """CaseLoop eval-harness entry: one probe against the exact immutable VersionSet."""
+    from agentmed.evaluate import evaluate_versionset as run_evaluate
+    from agentmed.evaluate import require_eval_token
+
+    settings = load_settings()
+    require_eval_token(settings, authorization)
+    return run_evaluate(settings, versionset_id, body.message)
+
+
+@app.get("/v2/versionsets/{versionset_id}")
+def get_versionset_endpoint(
+    versionset_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """CaseLoop eval-harness read: the VersionSet record bound by the registry."""
+    from agentmed.evaluate import get_versionset_record
+    from agentmed.evaluate import require_eval_token
+
+    settings = load_settings()
+    require_eval_token(settings, authorization)
+    return get_versionset_record(settings, versionset_id)
+
+
 class IngestBody(BaseModel):
     url: str
     title: str | None = None

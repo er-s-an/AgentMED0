@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     langfuse_secret_key: str = ""
     database_url: str = "sqlite:///./data/agentmed.db"
     agentmed_data_dir: Path = Path("./data")
+    caseloop_eval_token: str = ""
+    evaluate_registry_path: str = "workloads/xiaozhi-customer-service/registry.json"
     github_token: str = ""
     require_live: bool = True
     kernel_listen_host: str = "0.0.0.0"
