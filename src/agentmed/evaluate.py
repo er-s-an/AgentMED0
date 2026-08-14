@@ -251,6 +251,7 @@ def evaluate_versionset(
         {
             "request_id": request_id,
             "status": status,
+            "provider_origin": (settings.openai_base_url or "").rstrip("/"),
             "trace_id": trace_id,
             "versionset_id": versionset_id,
             "prompt_digest": prompt_component.get("digest"),
