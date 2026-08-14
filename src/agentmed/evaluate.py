@@ -175,7 +175,10 @@ def evaluate_versionset(
         "Authorization": f"Bearer {settings.openai_api_key}",
         "Content-Type": "application/json",
     }
-    timeout = httpx.Timeout(120.0, connect=10.0)
+    # Per-attempt cap (30s read): a single slow upstream call must not consume
+    # the eval-harness's whole probe budget (95-200s).  3 attempts x 30s leaves
+    # room for the harness's own retry-with-backoff on a 502.
+    timeout = httpx.Timeout(30.0, connect=10.0)
     # Provider-side resilience: transient upstream failures and empty completions
     # are retried up to 3 attempts; a persistent empty completion surfaces as 502
     # so the eval-harness's retry-with-backoff layer takes over.  The answer is
