@@ -1,171 +1,126 @@
 # AgentMED 落地 Plan
 
-> 配套文档：`docs/SPEC.md`  
-> 状态：已确认，施工中。仓库 https://github.com/er-s-an/AgentMED 。
+> 配套：`docs/SPEC.md`  
+> 日期：2026-08-14  
+> 仓库：https://github.com/er-s-an/AgentMED
+
+初赛（约 8/13–8/16）不交代码。复赛（约 8/25–9/3）要能路演一条真实闭环。下面按这个时间排，不再按「先 playbook、复赛再挂 AgentTeams」写——那条已经做过了。
 
 ---
 
-## 1. 仓库形态（确认后执行）
+## 1. 现在在哪
 
-```text
-AgentMED/
-  README.md
-  pyproject.toml                 # package: agentmed, CLI: agentmed
-  docker-compose.yml             # 仅 AgentMED Postgres；Langfuse 用 LANGFUSE_COMPOSE
-  src/agentmed/                  # Kernel / CLI / API / team playbook
-  agentteams/                    # 参赛用声明式资源
-    team.yaml
-    workers/*.yaml
-    skills/*/SKILL.md
-  workloads/kotaemon-lightrag-scope/
-    app/lightrag_store.py        # 复现 #758
-    eval/                        # 冻结测试，Builder 不可见
-  docs/SPEC.md
-  docs/PLAN.md
-  tests/
+骨架已经在仓库里，而且默认路径是 **AgentTeams 真跑，不是 golden playbook**：
+
+- Kernel 状态机、权限、Gate、`VerifiedCandidate / NOT DEPLOYED`、Shadow / 回滚分列
+- kotaemon #758 的失败模式 harness（不跑全站 UI）
+- `agentteams/` Team / Worker / Skill，CLI `run` 只派活、盯 Kernel
+- 开源仓库、双语 README、CI
+- AgentMED 自己的提示词：静态目录 + Kernel LLM 代理（代码在；现有集群要重切 URL 才抓得到运行时）
+
+过时的假设不要再跟：本地 playbook 当正式成功、复赛才第一次碰 AgentTeams、产品名还要改。
+
+---
+
+## 2. 叙事要成立的那句话
+
+别的 Agent 交来一次坏结果。人确认怎样算修好。里面一队 Agent 去查、改、验。验过了也不上线，只交出 `VerifiedCandidate / NOT DEPLOYED` 和证据包。
+
+评委伸手时，应该摸到三块，而不是一篇架构文：
+
+1. **外面**：Card 上只有报案 / 查状态 / 取证据。GitHub Issue 是证据，不是入口身份。
+2. **里面**：Manager → 质量官 → Workers；Kernel 改状态；Matrix 聊天不算数。
+3. **出口**：Gate 过了仍是 `NOT DEPLOYED`；有本地草稿和回滚；Langfuse 能按角色看见提示词（挂了就写 missing）。
+
+---
+
+## 3. 和 SPEC §11 差在哪
+
+| # | 验收 | 现在 | 评委伸手时 |
+|---|---|---|---|
+| 1 | 同 Issue 不重复立案 | Kernel 对未关闭 Case 幂等 | 够用 |
+| 2 | AcceptanceSpec 有 `human:` | `--accept` 已记 | 够用 |
+| 3 | base eval 稳定失败 | harness 单测在 | 够用 |
+| 4 | 至少一个 `VERIFIED`，known-bad 拦截 | Gate 会跑三件套 | 够用；live Builder 质量看运气 |
+| 5 | 草稿 PR 在、未 merge | 有 `draft-pr` Skill；上次 live 的 patch 像占位 | **要补**：导出必须是真 diff |
+| 6 | Shadow desired / observed / receipt 分列 | Kernel 已记 | 够用 |
+| 7 | 回滚后 observed 回到 base | 上次 live 做过 | 再录一次干净的 |
+| 8 | RegressionAsset 可被后续 Gate 引用 | 关闭时会写资产 | **要补**：下一 Case 真读到它 |
+| 9 | Langfuse 至少 Intake / Builder / Verifier 三条 | 代理和目录已写；现网 Worker 多半还直连模型 | **要补**：重切 LLM URL，截一张 UI |
+| 10 | 未授权外部动作 = 0 | 策略在，没有上游 push | 够用 |
+
+另外三件**叙事上要诚实、代码上先不做**：
+
+- A2A `message/send`：Card 已写明「合同在、门还没装」。初赛讲契约，复赛也不必先做 JSON-RPC。
+- 飞书 / 目标应用 live trace：SPEC 允许缺，标 `NEEDS_CONTEXT`。不要为了图好看去编 span。
+- 质量官上次会卡住，要人在 Matrix 里催一刀。协同还不够「Kernel 说了算」。
+
+**判断：** 产品故事约八成能讲；评委可复现的 Demo 大约一半。剩下的时间不要加表面，要把 live 闭环做成能再跑一遍的。
+
+---
+
+## 4. 明确不做
+
+- kotaemon 全量 UI
+- 真飞书、多租户、HA
+- 把 VerifiedCandidate 说成已上线
+- 第二套编排器、AgentLoop 依赖
+- 让质量官投票代替 Gate
+- 为了 PPT 改 README 塞实现细节
+- 改官方 `agentteams/skills/langfuse/`
+
+---
+
+## 5. 三波（初赛不交代码，时间够）
+
+### A. 初赛只讲（现在 → 约 8/16）
+
+不写新功能。PPT 直接搬 SPEC §3 角色、§7 Skill、§8 Team 图、§6 Langfuse 双层、§9 人批边界。
+
+评委听完应能复述：
+
+- 入口是 Agent，不是 Issue 机器人
+- 执行在 AgentTeams，账本在 Kernel
+- 出口是未部署的验证候选 + 证据包
+- 审查在 Langfuse，挂了就降级
+
+开源计划一句话：仓库已 public，Apache-2.0，欢迎在自己的 AgentTeams 上加载 `agentteams/`。
+
+### B. 把 Demo 做成可再跑（约 8/17–8/24）
+
+按这个顺序，做完一项再下一项：
+
+1. **现网 LLM 走 Kernel 代理**  
+   `AGENTMED_RETARGET_LLM=1` 或重跑 `live-stack`，重建 Worker。Langfuse 里能按 `agentmed-governance` 点开 Intake / Builder / Verifier。没有就写 missing，不许造。
+
+2. **质量官不再靠人催**  
+   `coordinate-loop` 只认 `GET /v1/cases/{id}` 的下一合法步。Builder 该上场时必须 `@` 到人，不许停在调查完。
+
+3. **草稿是真文件**  
+   `draft-pr` 写出能 `diff` 的 `draft.patch`。export 里能指到它。仍然不 merge、不 push 上游。
+
+4. **RegressionAsset 闭环**  
+   关闭后的 probes 能被下一次 Gate 读到（哪怕只是 manifest 引用 + 测试断言）。现在「写了但没人用」。
+
+5. **一条干净录像**  
+   另一台机器：`git pull` → `.env` → `live-stack` → `serve` → `run --signal #758 --accept`。出口对得上 SPEC §11。卡住就修协同，不要切回 playbook 充数。
+
+### C. 复赛路演（约 8/25–9/3）
+
+材料是 B 的产物，不是新功能：
+
+- 30 秒：坏结果进、人点头、队去干、出来未上线的候选
+- 2 分钟：Kernel 状态机 + Builder/Verifier 隔离
+- 1 分钟：Langfuse 双层（自己的提示词 / 目标应用可缺）
+- 1 分钟：草稿 + Shadow + 回滚，强调 `NOT DEPLOYED`
+- 备用：Gate `REJECTED` 也是闭环；对照补丁必须标明不是放水
+
+---
+
+## 6. 另一台机器怎么接
+
+```bash
+git pull origin main
 ```
 
-技术选型（MVP）：
-
-| 层 | 选择 | 原因 |
-|---|---|---|
-| Kernel | Python 3.13 + SQLAlchemy | 本机已有 3.13；Langfuse SDK 成熟 |
-| API | FastAPI，薄封装 Kernel | PRD：HTTP 是 canonical |
-| CLI | Typer | `agentmed run` / `case show` / `evidence export` |
-| LLM | OpenAI 兼容，默认 `gpt-4o-mini` | 环境已有 `OPENAI_API_KEY` |
-| 执行面 | AgentTeams YAML + Skill；本地用同一 Kernel 的确定性 playbook 唤醒隔离角色 | 复赛可加载真实 AgentTeams |
-| 审查面 | Langfuse self-host `localhost:3001` | 审计 + 诊断 |
-| 权威库 | SQLite 先跑通，`DATABASE_URL` 可换 Postgres | 十分钟本地闭环；compose 提供 Postgres |
-
-不在 MVP 引入第二套 Agent 框架（LangGraph / Crew 等）。
-
----
-
-## 2. 阶段
-
-### 阶段 0 — 改名与冻结边界（0.5 天）
-
-- 目录、包、CLI、环境变量、audit principal 全部改为 AgentMED / `agentmed`
-- 删除或改写一切对外 AgentMED 字样
-- 领域对象 `Case` 保留
-
-### 阶段 1 — Kernel 可测（1 天）
-
-单测覆盖：
-
-- Signal 幂等
-- 非人类不能确认 AcceptanceSpec
-- 非 Builder 不能交 candidate
-- 非 Verifier 不能交 Gate
-- Builder 不能验证自己
-- `VERIFIED` 才产生 `VerifiedCandidate.status = NOT_DEPLOYED`
-- 回滚不删除 Shadow 的历史 Operation
-
-交付：`pytest tests/test_kernel.py` 全绿。
-
-### 阶段 2 — kotaemon Gate（0.5 天）
-
-- base 源码使 `test_file_scope` 失败
-- 正确 candidate 使它通过，且 `test_empty_selection` 仍过
-- known-bad（只存 file_id、query 仍返回全部）必须失败
-- Builder 工作区不含 `eval/`
-
-交付：不调用 LLM 也能跑 Gate。
-
-### 阶段 3 — 隔离角色 + Langfuse（1 天）
-
-确定性 playbook 顺序唤醒：
-
-1. Intake（LLM 结构化 Issue；失败则确定性 fallback 填字段）
-2. 人类 `--accept`
-3. Investigator
-4. Attribution 跳过并写明原因
-5. Builder（只得源码 + spec + Issue，不得测试文件）
-6. Verifier（只得 candidate + 冻结 eval 结果，不得 Builder CoT）
-7. REJECT 则 Builder 再来一轮，只得 GateReport
-8. VERIFIED 后 Controller 做草稿 PR、Shadow、回滚
-9. Curator
-
-每角色独立 messages / 独立 tool 白名单 / 独立 Langfuse span。  
-Playbook 是 Controller，不是「再做一个 Lead 来改状态」。
-
-交付：Langfuse 里能按 role tag 把三条以上 trace 点开。
-
-### 阶段 4 — CLI 与证据导出（0.5 天）
-
-```text
-agentmed run --signal https://github.com/Cinnamon/kotaemon/issues/758 --accept
-agentmed case show <id>
-agentmed evidence export <id>
-```
-
-`--accept` 表示人类确认 Intake 起草的 spec，principal 记 `human:cli`。
-
-### 阶段 5 — AgentTeams 参赛包（0.5 天）
-
-- `agentteams/team.yaml` + 各 Worker YAML（identity / soul / skills）
-- 每个 Skill 的 `SKILL.md`：输入输出、调用条件、失败、安全边界
-- README：如何用 `agt apply` 载入；本地无集群时 playbook 等价
-
-初赛 PPT 用这份映射；复赛再要求集群里真跑。
-
-### 阶段 6 — 一次真人 Demo 录像级跑通（0.5 天）
-
-用真实 `OPENAI_API_KEY` 跑阶段 4。记录：
-
-- 耗时、token、阻塞点
-- Gate 是否拦住 known-bad
-- 未授权外部动作是否为 0
-
-若 Builder 模型改坏文件：允许一轮 REJECT→重试；仍失败则 Demo 展示 `REJECTED` 也算闭环（Spec 要求至少一个 VERIFIED，必要时用确定性正确补丁作为对照 candidate，但必须标明这是对照，不是 Verifier 放水）。
-
----
-
-## 3. 建议的文件落地顺序（确认后）
-
-1. 改名  
-2. `kernel.py` 定稿 + 单测  
-3. `workloads/...` + `gate.py`  
-4. `team/playbook.py` + `llm.py` + `observability.py`  
-5. `cli.py`  
-6. `agentteams/`  
-7. README 里的一键 Demo  
-
-不要先做 Web Console、飞书、Nacos、Higress。
-
----
-
-## 4. 与赛程的关系
-
-| 日期 | 你 | 实现（Spec 确认后） |
-|---|---|---|
-| 8/13–8/16 初赛 | 你做 PPT | 若确认够早：阶段 1–2 可开始；初赛不强制代码 |
-| PPT 内容 | 场景、Agent Identity、AgentTeams 映射、Skill 表、Langfuse 双层、审批回滚、开源计划 | Spec 第 3、7、8 节可直接搬 |
-| 8/25–9/3 复赛 | 路演材料 | 阶段 3–6 必须可运行，并给出 AgentTeams 代码包 |
-
-初赛可以没有可执行包。复赛没有 AgentTeams 映射会被扣「协同基点」分。
-
----
-
-## 5. 风险
-
-| 风险 | 处理 |
-|---|---|
-| kotaemon 全量跑不起来 | 已选择失败模式 harness，不跑全量 UI |
-| AgentTeams 本机太重 | MVP 用 playbook + 同构 Skill；复赛再挂集群 |
-| Langfuse 没起来 | 降级并在 evidence 里写 missing；不伪造 |
-| Builder 改不出正确补丁 | 一轮重试；对照 candidate 仅用于证明 Gate 真能 PASS，展示时标明 |
-| 产品名与目录不一致 | 阶段 0 先改名，避免 PPT 和仓库对不上 |
-
----
-
-## 6. 请你拍板的点
-
-1. **产品名 AgentMED** 是否还要对外解释全称？不解释就只当专有名。  
-2. **仓库是否立即从 `AgentMED/` 改名为 `AgentMED/`？** 建议是。  
-3. **首条 Signal 是否锁定 kotaemon #758？** 换 Issue 会改 Gate Adapter。  
-4. **MVP 是否包含本地草稿 PR + 回滚 drill？** Spec 按「包含」写的。  
-5. **飞书是否初赛只出现在架构图、复赛再接？** 建议是。  
-6. **Spec 确认后是否按阶段 0 开始改名和 Kernel 单测？** 你点头我才动代码。
-
-确认方式：直接回这 6 条的决定即可。在此之前不推进开发。
+先读本文件第 5 节，再动代码。SPEC 是合同，本文件是施工顺序。不要从阶段 0 改名重新来。
