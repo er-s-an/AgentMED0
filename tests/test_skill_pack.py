@@ -71,6 +71,7 @@ def test_first_party_skills_have_contract_and_run_sh() -> None:
             assert poll.is_file(), "coordinate-loop must ship scripts/poll.sh"
             poll_text = poll.read_text(encoding="utf-8")
             assert "X-AgentMED-Principal" in poll_text, "poll.sh must send X-AgentMED-Principal"
+            assert "/next" in poll_text, "poll.sh must ask Kernel for the next legal step"
         else:
             assert "X-AgentMED-Principal" in body, f"{script} must send X-AgentMED-Principal"
 

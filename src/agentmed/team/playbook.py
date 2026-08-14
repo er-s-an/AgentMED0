@@ -24,7 +24,7 @@ from agentmed.prompts import (
     VERIFIER_SYSTEM,
     builder_user_prompt,
 )
-from agentmed.release import verify_candidate, write_shadow_and_rollback
+from agentmed.release import verify_candidate
 from agentmed.store import Store
 
 FALLBACK_EXPECTED = (
@@ -107,9 +107,9 @@ def _parse_intake(text: str | None, issue: dict[str, Any]) -> dict[str, Any]:
             parsed = {}
     title = str(parsed.get("title") or issue.get("title") or "kotaemon file scope")
     summary = str(parsed.get("summary") or issue.get("body") or title)
-    expected = str(parsed.get("expected_behavior") or FALLBACK_EXPECTED)
-    badcase = str(parsed.get("badcase_input") or FALLBACK_BADCASE)
-    judge = str(parsed.get("judge") or FALLBACK_JUDGE)
+    expected = str(parsed.get("expected_behavior") or "").strip()
+    badcase = str(parsed.get("badcase_input") or "").strip()
+    judge = str(parsed.get("judge") or "").strip()
     ai_related = parsed.get("ai_related", True)
     return {
         "title": title,
@@ -217,8 +217,17 @@ def run_mvp(*, signal_url: str, accept: bool = True, data_dir: Path | None = Non
         obs.flush()
         return bundle
 
+    kernel.propose_acceptance(
+        principal=ROLE_PRINCIPALS["intake"],
+        case_id=case_id,
+        expected_behavior=intake["expected_behavior"] or FALLBACK_EXPECTED,
+        badcase_input=intake["badcase_input"] or FALLBACK_BADCASE,
+        judge=intake["judge"] or FALLBACK_JUDGE,
+    )
     if not accept:
         return finish()
+    if not intake["expected_behavior"] or not intake["badcase_input"]:
+        return finish({"next": kernel.next_actions(case_id), "blocked": "NEEDS_ACCEPTANCE_CRITERIA"})
 
     spec = kernel.confirm_acceptance(
         principal="human:cli",
@@ -226,6 +235,7 @@ def run_mvp(*, signal_url: str, accept: bool = True, data_dir: Path | None = Non
         expected_behavior=intake["expected_behavior"],
         badcase_input=intake["badcase_input"],
         judge=intake["judge"],
+        confirmed_via="human",
     )
 
     with obs.trace_role("investigator", case_id, "investigator.collect"):
@@ -239,20 +249,25 @@ def run_mvp(*, signal_url: str, accept: bool = True, data_dir: Path | None = Non
                 "workload": WORKLOAD,
             },
         )
-        kernel.add_evidence(
+        from agentmed.langfuse_bus import collect_investigation_evidence
+        from agentmed.workloads import get_adapter
+
+        collected = collect_investigation_evidence(
+            kernel,
             principal=ROLE_PRINCIPALS["investigator"],
             case_id=case_id,
-            kind="github_issue",
-            summary=f"Upstream issue {issue.get('url') or signal_url}: {issue.get('title')}",
-            artifacts=[
-                {
-                    "type": "github_issue",
-                    "url": issue.get("url") or signal_url,
-                    "title": issue.get("title"),
-                    "number": issue.get("number"),
-                }
-            ],
-            missing=["target_app_langfuse_traces"],
+            adapter=get_adapter("kotaemon"),
+            signal=signal,
+            settings=settings,
+        )
+        kernel.seal_episode(
+            principal=ROLE_PRINCIPALS["investigator"],
+            case_id=case_id,
+            coverage={
+                "github": bool(collected.get("github_evidence")),
+                "langfuse_queried": bool(collected.get("queried")),
+            },
+            extra_missing=list(collected.get("missing") or []),
         )
         _complete(
             llm,
@@ -263,7 +278,7 @@ def run_mvp(*, signal_url: str, accept: bool = True, data_dir: Path | None = Non
             user=(
                 f"Issue: {issue.get('title')}\n{issue.get('body')}\n"
                 f"Snapshot: {KOTAEMON_REPO}@{KOTAEMON_COMMIT}\n"
-                "Missing live Langfuse target traces. Summarize evidence only. Do not patch."
+                "Langfuse was queried during investigate. Summarize receipts only. Do not invent spans. Do not patch."
             ),
         )
 
@@ -350,10 +365,6 @@ def run_mvp(*, signal_url: str, accept: bool = True, data_dir: Path | None = Non
                 system=VERIFIER_SYSTEM,
                 user=json.dumps({"gate_evidence": report.get("evidence")}, default=str),
             )
-
-    if report.get("verdict") == "VERIFIED":
-        runtime = Path(settings.agentmed_data_dir) / "runtime" / case_id
-        write_shadow_and_rollback(kernel, case_id, candidate, runtime)
 
     with obs.trace_role("curator", case_id, "curator.close"):
         curator_notes = _complete(

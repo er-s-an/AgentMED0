@@ -32,23 +32,15 @@ When the admin asks to run AgentMED on a GitHub issue:
    Use the full Matrix ID `@quality-officer:matrix-local.agentteams.io:18080`.
    Do not @mention team Workers from admin DM — they cannot see it.
    Do not create new Workers; team `agentmed-quality` is already Running.
-4. quality-officer must drive this order, each Worker calling Kernel with header `X-AgentMED-Principal`:
-   - intake `agent:intake` → POST /v1/signals/ingest `{"url":"<issue>"}`
-   - wait until Case state is `investigating` (human CLI confirms AcceptanceSpec)
-   - investigator `agent:investigator` → POST /v1/cases/{id}/investigate
-   - attribution `agent:attribution` → POST /v1/cases/{id}/attribute
-   - builder `agent:builder` → GET /v1/cases/{id}/builder-context then POST /v1/cases/{id}/candidates
-   - verifier `agent:verifier` → GET /v1/cases/{id}/verifier-context then POST /v1/cases/{id}/verify
-   - on REJECT: builder retries from GateReport only; never patch a sealed candidate
-   - on VERIFIED: quality-officer POST /v1/cases/{id}/release
-   - curator `agent:curator` → POST /v1/cases/{id}/close
-5. After every step, GET /v1/cases/{id} from Kernel. Do not trust Worker self-report.
-6. YOLO: do not ask the admin to confirm Worker creation or task assignment.
-7. Never merge, git push, or production-deploy.
-8. A closed Case for kotaemon #758 from a previous local playbook (`[fallback-golden]`) does NOT count. Intake must POST /v1/signals/ingest anyway; Kernel will open a NEW Case because the old one is closed. Do not report the old Case as success.
-
-
-kotaemon #758 is the first workload. Builder may only change lightrag_store.py.
+4. quality-officer polls `GET /v1/cases/{id}/next` (or `coordinate-loop/scripts/poll.sh --case {id}`) after every step.
+   Dispatch only `next[0]`: that principal, that skill, that Kernel action.
+   Do not invent the next legal state from memory.
+5. Human CLI confirms AcceptanceSpec when `next.role=human`. Leader waits; do not skip.
+6. Builder reads `builder-context.files` / `allowed_files` / `instruction`. Do not assume lightrag_store.py.
+7. On REJECT: builder opens a new revision from GateReport only; never patch a sealed candidate.
+8. YOLO: do not ask the admin to confirm Worker creation or task assignment.
+9. Never merge, git push, or production-deploy.
+10. A closed Case from a previous local playbook (`[fallback-golden]`) does NOT count. Intake must POST /v1/signals/ingest anyway.
 <!-- agentmed-end -->
 """
 
@@ -108,19 +100,18 @@ def rewrite_env_key(path: Path, key: str, value: str) -> dict[str, Any]:
 
 
 def retarget_agentteams_llm(settings: Settings) -> dict[str, Any]:
-    """Point AgentTeams at the Kernel LLM proxy. Opt-in: AGENTMED_RETARGET_LLM=1.
+    """Point AgentTeams at the Kernel LLM proxy so generations land in Langfuse.
 
-    Does not print secrets. Does not rewrite the file unless explicitly enabled,
-    so `apply-agentteams` on someone else's cluster is not a surprise.
+    Default on. Set AGENTMED_RETARGET_LLM=0 to skip rewriting another cluster.
     """
     url = f"http://host.docker.internal:{settings.kernel_api_port}/v1"
-    if os.environ.get("AGENTMED_RETARGET_LLM") != "1":
+    if os.environ.get("AGENTMED_RETARGET_LLM", "1") == "0":
         return {
             "status": "skipped",
             "changed": False,
             "key": "AGENTTEAMS_OPENAI_BASE_URL",
             "url": url,
-            "note": "Set AGENTMED_RETARGET_LLM=1 to rewrite AGENTTEAMS_OPENAI_BASE_URL outside this repo.",
+            "note": "AGENTMED_RETARGET_LLM=0; workers will not send LLM calls through Kernel.",
         }
     result = rewrite_env_key(_env_file(), "AGENTTEAMS_OPENAI_BASE_URL", url)
     result["restart_required"] = bool(result.get("changed"))
@@ -243,9 +234,10 @@ Then `copaw channels send` to the Leader Room (Workers cannot see this admin DM)
   target session / room: {leader['room_id'] or 'agt get workers quality-officer -o json .roomID'}
 
 Tell quality-officer to run skill coordinate-loop on {signal_url}.
-IMPORTANT: Kernel currently lists an old closed Case (golden-fallback playbook). That is NOT this run. Intake MUST POST /v1/signals/ingest with the GitHub URL. Kernel will open a NEW Case. Do not stop because a closed Case already exists.
+After every step, poll GET /v1/cases/{{id}}/next and dispatch only next[0].
+IMPORTANT: an old closed Case from golden-fallback playbook is NOT this run. Intake MUST POST /v1/signals/ingest. Kernel will open a NEW Case.
 Workers must execute their scripts against Kernel HTTP. You do not patch code. You do not verify.
-Poll Kernel after every Worker step. Notify me in this DM only with Kernel state, never with questions.
+Notify me in this DM only with Kernel state, never with questions.
 """
     sent = send_manager_message(settings, message)
     return {

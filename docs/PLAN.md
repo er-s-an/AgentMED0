@@ -55,7 +55,7 @@
 - 飞书 / 目标应用 live trace：SPEC 允许缺，标 `NEEDS_CONTEXT`。不要为了图好看去编 span。
 - 质量官上次会卡住，要人在 Matrix 里催一刀。协同还不够「Kernel 说了算」。
 
-**判断：** 产品故事约八成能讲；评委可复现的 Demo 大约一半。剩下的时间不要加表面，要把 live 闭环做成能再跑一遍的。
+**判断：** Langfuse 已是默认证据总线（retarget 开、investigate 必查、eval 写 target span）。P0–P4 已落到 Kernel / HTTP / review.html：验收草稿≠确认、双 surface Gate、LangGraph #7684、双 Gate + WorkOrder、Case Workspace + 薄 MCP + `agentmed init`。Shadow 永远不是发布。
 
 ---
 
@@ -91,19 +91,22 @@
 按这个顺序，做完一项再下一项：
 
 1. **现网 LLM 走 Kernel 代理**  
-   `AGENTMED_RETARGET_LLM=1` 或重跑 `live-stack`，重建 Worker。Langfuse 里能按 `agentmed-governance` 点开 Intake / Builder / Verifier。没有就写 missing，不许造。
+   默认改写 AgentTeams 的 LLM URL 到 Kernel。`AGENTMED_RETARGET_LLM=0` 才跳过。重建 Worker 后，Langfuse 里应按 `agentmed-governance` 看到角色 generation；`investigate` 必须查过 Langfuse。没有就写 missing，不许造。
 
 2. **质量官不再靠人催**  
-   `coordinate-loop` 只认 `GET /v1/cases/{id}` 的下一合法步。Builder 该上场时必须 `@` 到人，不许停在调查完。
+   `coordinate-loop` 每步先 `GET /v1/cases/{id}/next`，只派那一步。Builder 该上场时必须 `@` 到人，不许停在调查完。
 
-3. **草稿是真文件**  
-   `draft-pr` 写出能 `diff` 的 `draft.patch`。export 里能指到它。仍然不 merge、不 push 上游。
+3. **抽 Workload Adapter**  
+   Gate / Builder / Shadow 走 `AIApplication.slug` 对应的 adapter。kotaemon 仍是唯一真实 workload；换应用不必复制 `lightrag_store.py`。未知 slug 失败。
 
-4. **RegressionAsset 闭环**  
-   关闭后的 probes 能被下一次 Gate 读到（哪怕只是 manifest 引用 + 测试断言）。现在「写了但没人用」。
+4. **草稿是真文件**  
+   `draft-pr` 写出能 `diff` 的 `draft.patch`。export 里能指到它。仍然不 merge、不 push 上游。给人看的 kotaemon #758 包在 `workloads/kotaemon-lightrag-scope/upstream/`；人加 `--i-am-human` 才能开 PR。
 
-5. **一条干净录像**  
-   另一台机器：`git pull` → `.env` → `live-stack` → `serve` → `run --signal #758 --accept`。出口对得上 SPEC §11。卡住就修协同，不要切回 playbook 充数。
+5. **RegressionAsset 闭环**  
+   关闭后的 probes 进入下一次 Gate 的 `evidence.prior_regression_assets`（引用，不改判定）。
+
+6. **一条干净录像**  
+   另一台机器：`git pull` → `.env` → `live-stack` → `serve` → `run --signal #758 --accept-adapter-defaults`。出口对得上 SPEC §11。卡住就修协同，不要切回 playbook 充数。
 
 ### C. 复赛路演（约 8/25–9/3）
 

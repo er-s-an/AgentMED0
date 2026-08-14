@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from agentmed.gate import golden_source
 from agentmed.kernel import ROLE_PRINCIPALS
+from tests.conftest import KOTAEMON_ACCEPT
 
 
 def _client(tmp_path, monkeypatch) -> TestClient:
@@ -191,7 +192,7 @@ def test_draft_pr_refuses_unverified_case(tmp_path, monkeypatch) -> None:
     accepted = client.post(
         f"/v1/cases/{case_id}/accept",
         headers={"X-AgentMED-Principal": "human:cli"},
-        json={},
+        json=KOTAEMON_ACCEPT,
     )
     assert accepted.status_code == 200, accepted.text
     client.post(

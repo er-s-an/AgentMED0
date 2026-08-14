@@ -4,6 +4,8 @@ from fastapi.testclient import TestClient
 
 from agentmed.gate import golden_source
 from agentmed.kernel import ROLE_PRINCIPALS
+from tests.conftest import KOTAEMON_ACCEPT
+from tests.helpers import authorize_local_shadow
 
 
 def test_kernel_http_ingest_verify_close(tmp_path, monkeypatch) -> None:
@@ -37,7 +39,7 @@ def test_kernel_http_ingest_verify_close(tmp_path, monkeypatch) -> None:
     accepted = client.post(
         f"/v1/cases/{case_id}/accept",
         headers={"X-AgentMED-Principal": "human:cli"},
-        json={},
+        json=KOTAEMON_ACCEPT,
     )
     assert accepted.status_code == 200, accepted.text
     investigated = client.post(
@@ -68,6 +70,13 @@ def test_kernel_http_ingest_verify_close(tmp_path, monkeypatch) -> None:
     )
     assert verified.status_code == 200, verified.text
     assert verified.json()["verdict"] == "VERIFIED"
+    refused = client.post(
+        f"/v1/cases/{case_id}/release",
+        headers={"X-AgentMED-Principal": ROLE_PRINCIPALS["lead"]},
+    )
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == "NEEDS_RELEASE_PLAN"
+    authorize_local_shadow(client, case_id)
     released = client.post(
         f"/v1/cases/{case_id}/release",
         headers={"X-AgentMED-Principal": ROLE_PRINCIPALS["lead"]},
@@ -81,3 +90,38 @@ def test_kernel_http_ingest_verify_close(tmp_path, monkeypatch) -> None:
     assert closed.status_code == 200, closed.text
     shown = client.get(f"/v1/cases/{case_id}")
     assert shown.json()["state"] == "closed"
+
+
+def test_empty_accept_needs_criteria(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "agentmed.db"
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db}")
+    monkeypatch.setenv("AGENTMED_DATA_DIR", str(data))
+    monkeypatch.setenv("REQUIRE_LIVE", "false")
+    issue = {
+        "url": "https://github.com/Cinnamon/kotaemon/issues/758",
+        "title": "scoped",
+        "body": "leak",
+        "number": 758,
+    }
+    monkeypatch.setattr("agentmed.api.fetch_github_issue", lambda url, token="": issue)
+    from agentmed.api import app
+
+    client = TestClient(app)
+    ingested = client.post(
+        "/v1/signals/ingest",
+        headers={"X-AgentMED-Principal": ROLE_PRINCIPALS["intake"]},
+        json={"url": issue["url"]},
+    )
+    case_id = ingested.json()["case"]["id"]
+    empty = client.post(
+        f"/v1/cases/{case_id}/accept",
+        headers={"X-AgentMED-Principal": "human:cli"},
+        json={},
+    )
+    assert empty.status_code == 409
+    detail = empty.json()["detail"]
+    assert detail["code"] == "NEEDS_ACCEPTANCE_CRITERIA"
+    nxt = client.get(f"/v1/cases/{case_id}/next").json()["next"][0]
+    assert nxt["code"] == "NEEDS_ACCEPTANCE_CRITERIA"

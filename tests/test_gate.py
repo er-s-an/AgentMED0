@@ -42,6 +42,7 @@ def ready_case(kernel: Kernel) -> dict:
         case_id=case["id"],
         manifest={"files": ["lightrag_store.py"]},
     )
+    kernel.seal_episode(principal=ROLE_PRINCIPALS["investigator"], case_id=case["id"], coverage={"test": True})
     return kernel.store.get("cases", case["id"])
 
 

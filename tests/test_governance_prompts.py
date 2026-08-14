@@ -45,6 +45,11 @@ def test_infer_role_from_system_identity() -> None:
     assert verifier == "verifier"
     assert manager == "manager"
     assert header == "intake"
+    target = infer_role(
+        [{"role": "user", "content": "hi"}],
+        {"User-Agent": "OpenClaw/2026.5.18", "Authorization": "Bearer agentmed-kernel-proxy"},
+    )
+    assert target == "target_app"
 
 
 def test_redact_keys_and_langfuse_secrets() -> None:
@@ -80,14 +85,21 @@ def test_rewrite_env_key_only_changes_target(tmp_path) -> None:
     assert "must-not-appear-in-return" not in dumped
 
 
-def test_retarget_llm_is_opt_in(monkeypatch) -> None:
+def test_retarget_llm_defaults_on(monkeypatch, tmp_path) -> None:
+    env = tmp_path / "agentteams-manager.env"
+    env.write_text("AGENTTEAMS_OPENAI_BASE_URL=https://example.invalid/v1\n", encoding="utf-8")
     monkeypatch.delenv("AGENTMED_RETARGET_LLM", raising=False)
+    monkeypatch.setattr("agentmed.team.dispatch._env_file", lambda: env)
     from agentmed.config import Settings
     from agentmed.team.dispatch import retarget_agentteams_llm
 
+    updated = retarget_agentteams_llm(Settings())
+    assert updated["status"] == "updated"
+    assert "8088/v1" in env.read_text(encoding="utf-8")
+
+    monkeypatch.setenv("AGENTMED_RETARGET_LLM", "0")
     skipped = retarget_agentteams_llm(Settings())
     assert skipped["status"] == "skipped"
-    assert skipped["changed"] is False
 
 
 def test_governance_prompts_endpoint(tmp_path, monkeypatch) -> None:

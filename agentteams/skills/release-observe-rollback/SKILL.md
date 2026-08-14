@@ -18,16 +18,18 @@ assign_when: quality-officer sees Kernel verdict VERIFIED and must request Contr
 
 ## 调用条件
 
-Verifier 已 `VERIFIED`。由 quality-officer **自己跑**本脚本（不要让 Builder/Verifier 发版）。draft PR 工件另跑 `draft-pr`。
+Verifier 已 `VERIFIED`。先 `GET /v1/cases/{id}/next`。没有人批准的 WorkOrder 就停，不要 POST `/release`。由 quality-officer **自己跑**本脚本（不要让 Builder/Verifier 发版）。draft PR 工件另跑 `draft-pr`。
 
 ## 依赖
 
-- Kernel `POST /v1/cases/{id}/release`
+- Kernel `GET /v1/cases/{id}/next`
+- Kernel `POST /v1/cases/{id}/shadow`（`/release` 只是别名，无 Approval 会 409）
 - Controller 在 Kernel 进程内执行
 
 ## 失败处理
 
-- 无候选 / 未验证 → 打印 Kernel 错误
+- next 不是 `SHADOW_DRILL` → 停，把 next 打出来给人批
+- 无候选 / 未验证 / 无 Approval → 打印 Kernel 错误
 - 观察失败 → rollback 证据必须留下；禁止“算了直接上生产”
 
 ## 安全边界

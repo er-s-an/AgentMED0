@@ -35,7 +35,7 @@ Manager 把信号或 Case 交给 quality-officer。全程串行，每步后 poll
 
 - 不信任聊天。Kernel 未变则重试调度，不跳过 Acceptance
 - REJECT → 只把 GateReport 给 Builder 开新 revision
-- 监控/Langfuse 缺失 → 允许 NEEDS_CONTEXT 继续，禁止伪造
+- Langfuse 必须先查。`investigate` 会 query + 复现失败查询并尝试写 target span。没有 target trace 记 missing，禁止伪造。Case 可以继续，但不得假装查过。
 
 ## 安全边界
 
@@ -65,12 +65,14 @@ bash /root/.copaw-worker/quality-officer/skills/coordinate-loop/scripts/run.sh -
 
 ## Sequence (serial)
 
+每步先 `GET /v1/cases/$CASE_ID/next`，只派 `next[0]` 那一步。不要按记忆跳步。`closed` 时 `next` 为空，停。
+
 1. @intake: `ingest-signal/scripts/run.sh <github-url>`（或 `ingest-langfuse/scripts/run.sh`）。可选 `provision-langfuse`（project/OTLP/密钥引用）。等到 `GET /v1/cases?source_ref=` 有 Case。
-2. 等到 Kernel `state=investigating`（人类 CLI 确认 AcceptanceSpec）。禁止跳过。
-3. @investigator: `bind-version-snapshot`；可选 `provision-langfuse`、`connect-observability`、`query-langfuse $CASE_ID investigator`。监控挂了只降级（receipt.missing），禁止伪造指标。
-4. @attribution: `attribute-skip`；可选 `query-langfuse $CASE_ID attribution`。
-5. @builder: `propose-candidate`。Never forward Builder CoT to Verifier.
-6. @verifier: `independent-verify`。隔离。Langfuse 只用 `query-langfuse $CASE_ID verifier`（eval/target）。
-7. REJECTED: @builder 只给 GateReport；禁止 patch 已密封候选。
-8. VERIFIED: 你跑 `release-observe-rollback`，再跑 `draft-pr/scripts/run.sh $CASE_ID`。
-9. @curator: `curate-regression-asset`。
+2. `next.role=human`：等到人类 CLI 确认 AcceptanceSpec。禁止跳过。
+3. `next.skill=bind-version-snapshot`：@investigator 跑 `bind-version-snapshot`（Kernel 会查 Langfuse 并复现失败查询）。然后必须 `query-langfuse $CASE_ID investigator` 再读一遍。`provision-langfuse` 在本步之前跑一次。监控挂了只降级，禁止伪造。
+4. `next.skill=attribute-skip`：@attribution；必须 `query-langfuse $CASE_ID attribution`。
+5. `next.skill=propose-candidate`：@builder。Never forward Builder CoT to Verifier.
+6. `next.skill=independent-verify`：@verifier。隔离。Langfuse 只用 `query-langfuse $CASE_ID verifier`（eval/target）。
+7. REJECTED 后再 `GET .../next`：仍是 propose-candidate；只把 GateReport 给 Builder。禁止 patch 已密封候选。
+8. `next.skill=release-observe-rollback`：你跑该 skill，再跑 `draft-pr/scripts/run.sh $CASE_ID`。
+9. `next.skill=curate-regression-asset`：@curator。
