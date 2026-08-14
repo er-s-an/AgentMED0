@@ -270,6 +270,9 @@ def evaluate_versionset(
         "retrieval": [],
         "status": status,
         "trace_id": trace_id,
+        # 真实提供者来源：本内核直连的官方模型端点（eval-harness 的 live
+        # 候选 schema 校验要求与 OFFICIAL_STEPFUN_BASE_URL 一致）。
+        "provider_origin": (settings.openai_base_url or "").rstrip("/"),
     }
 
 
