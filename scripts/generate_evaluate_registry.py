@@ -83,7 +83,9 @@ def main() -> None:
             "kind": "model",
             "digest": M1_DIGEST,
             "model": "step-3.7-flash",
-            "params": {"temperature": 0.0, "max_tokens": 1024},
+            # 1024 会把推理预算烧光（finish=length + 空 content，实测于 RK/cs-003）；
+            # 2048 给 reasoning 留出空间后稳定产出最终 content。
+            "params": {"temperature": 0.0, "max_tokens": 2048},
         },
     }
     versionset_records = {}

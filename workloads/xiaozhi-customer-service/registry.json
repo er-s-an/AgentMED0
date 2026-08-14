@@ -643,7 +643,7 @@
       "model": "step-3.7-flash",
       "params": {
         "temperature": 0.0,
-        "max_tokens": 1024
+        "max_tokens": 2048
       }
     }
   },
@@ -1256,7 +1256,7 @@
           "model": "step-3.7-flash",
           "params": {
             "temperature": 0.0,
-            "max_tokens": 1024
+            "max_tokens": 2048
           }
         }
       }
@@ -1869,7 +1869,7 @@
           "model": "step-3.7-flash",
           "params": {
             "temperature": 0.0,
-            "max_tokens": 1024
+            "max_tokens": 2048
           }
         }
       }
@@ -2482,7 +2482,7 @@
           "model": "step-3.7-flash",
           "params": {
             "temperature": 0.0,
-            "max_tokens": 1024
+            "max_tokens": 2048
           }
         }
       }
@@ -3095,7 +3095,7 @@
           "model": "step-3.7-flash",
           "params": {
             "temperature": 0.0,
-            "max_tokens": 1024
+            "max_tokens": 2048
           }
         }
       }
@@ -3708,7 +3708,7 @@
           "model": "step-3.7-flash",
           "params": {
             "temperature": 0.0,
-            "max_tokens": 1024
+            "max_tokens": 2048
           }
         }
       }
