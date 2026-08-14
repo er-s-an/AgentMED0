@@ -176,26 +176,42 @@ def evaluate_versionset(
         "Content-Type": "application/json",
     }
     timeout = httpx.Timeout(120.0, connect=10.0)
-    try:
-        with httpx.Client(timeout=timeout) as client:
-            response = client.post(url, json=payload, headers=upstream_headers)
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"upstream evaluate failed: {type(exc).__name__}") from exc
-    if response.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"upstream evaluate HTTP {response.status_code}: {response.text[:300]}",
-        )
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail="upstream returned non-JSON") from exc
-    choices = body.get("choices") or []
+    # Provider-side resilience: transient upstream failures and empty completions
+    # are retried up to 3 attempts; a persistent empty completion surfaces as 502
+    # so the eval-harness's retry-with-backoff layer takes over.  The answer is
+    # never fabricated: status stays "ok" only for a real non-empty completion.
     answer = ""
-    if choices and isinstance(choices[0], dict):
-        message_obj = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
-        answer = str(message_obj.get("content") or "")
-    usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+    usage: dict[str, Any] = {}
+    for attempt in range(1, 4):
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(url, json=payload, headers=upstream_headers)
+        except httpx.HTTPError as exc:
+            if attempt == 3:
+                raise HTTPException(status_code=502, detail=f"upstream evaluate failed: {type(exc).__name__}") from exc
+            continue
+        if response.status_code != 200:
+            if attempt == 3:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"upstream evaluate HTTP {response.status_code}: {response.text[:300]}",
+                )
+            continue
+        try:
+            body = response.json()
+        except ValueError as exc:
+            if attempt == 3:
+                raise HTTPException(status_code=502, detail="upstream returned non-JSON") from exc
+            continue
+        choices = body.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            message_obj = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
+            answer = str(message_obj.get("content") or "")
+        usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+        if answer:
+            break
+    if not answer:
+        raise HTTPException(status_code=502, detail="upstream returned empty completion after 3 attempts")
 
     request_id = "req_" + uuid.uuid4().hex[:24]
     trace_id = "tr_" + uuid.uuid4().hex[:24]
