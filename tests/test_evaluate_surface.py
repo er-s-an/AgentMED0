@@ -98,6 +98,53 @@ def test_evaluate_returns_frozen_digest_envelope(tmp_path, monkeypatch) -> None:
     assert env["kb_manifest_digest"] == P0
     assert env["model_digest"] == P1
     assert env["status"] == "ok"
+    assert env["trace_id"].startswith("tr_")
+    assert env["request_id"].startswith("req_")
+
+
+def test_provider_log_roundtrip_and_exactly_one_contract(tmp_path, monkeypatch) -> None:
+    client = _client(monkeypatch, tmp_path)
+    import agentmed.evaluate as evaluate
+    from agentmed.config import load_settings
+
+    settings = load_settings()
+    evaluate._append_provider_log(
+        settings,
+        {
+            "request_id": "req_logtest1234567890",
+            "status": "ok",
+            "trace_id": "tr_logtest1234567890",
+            "versionset_id": "vset_cell_C",
+            "prompt_digest": P1,
+            "kb_manifest_digest": P0,
+            "model_digest": P1,
+            "answer_digest": "sha256:" + "e" * 64,
+        },
+    )
+    resp = client.get(
+        "/v2/logs",
+        params={"request_id": "req_logtest1234567890"},
+        headers=_auth(),
+    )
+    assert resp.status_code == 200, resp.text
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["trace_id"] == "tr_logtest1234567890"
+    assert items[0]["versionset_id"] == "vset_cell_C"
+
+    missing = client.get(
+        "/v2/logs",
+        params={"request_id": "req_missing123456789"},
+        headers=_auth(),
+    )
+    assert missing.status_code == 200
+    assert missing.json()["items"] == []
+
+
+def test_provider_log_requires_token(tmp_path, monkeypatch) -> None:
+    client = _client(monkeypatch, tmp_path)
+    resp = client.get("/v2/logs", params={"request_id": "req_whatever123456"})
+    assert resp.status_code == 401, resp.text
 
 
 def test_evaluate_unknown_versionset_404(tmp_path, monkeypatch) -> None:

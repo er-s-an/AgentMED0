@@ -17,6 +17,7 @@ The endpoint fails closed (503) when the token is not provisioned.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from pathlib import Path
@@ -90,6 +91,47 @@ def get_versionset_record(settings: Settings, versionset_id: str) -> dict[str, A
     return record
 
 
+def provider_log_path(settings: Settings) -> Path:
+    data_dir = Path(settings.agentmed_data_dir)
+    if not data_dir.is_absolute():
+        data_dir = REPO_ROOT / data_dir
+    return data_dir / "evaluate_log.jsonl"
+
+
+def _append_provider_log(settings: Settings, entry: dict[str, Any]) -> None:
+    """Append one provider-log entry (immutable JSONL; CaseLoop get_log reads it)."""
+    path = provider_log_path(settings)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + chr(10))
+    except OSError:
+        # Persistence failure must not fail the evaluation itself; the control
+        # plane's get_log then answers 404 and the trial is rejected fail-closed.
+        pass
+
+
+def get_provider_log(settings: Settings, request_id: str) -> dict[str, Any]:
+    path = provider_log_path(settings)
+    items: list[dict[str, Any]] = []
+    if path.exists():
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if row.get("request_id") == request_id:
+                        items.append(row)
+        except OSError as exc:
+            raise HTTPException(status_code=503, detail=f"provider log unreadable: {exc}") from exc
+    return {"items": items}
+
+
 def evaluate_versionset(
     settings: Settings,
     versionset_id: str,
@@ -156,6 +198,7 @@ def evaluate_versionset(
     usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
 
     request_id = "req_" + uuid.uuid4().hex[:24]
+    trace_id = "tr_" + uuid.uuid4().hex[:24]
     try:
         obs = Observability(settings)
         obs.generation(
@@ -175,12 +218,28 @@ def evaluate_versionset(
                 "model_digest": model_component.get("digest"),
             },
             tags=["caseloop", "caseloop-eval", versionset_id],
+            trace_id=trace_id,
         )
         obs.flush()
     except Exception:
         # Observability must never fail an evaluation; the control-plane audit
         # trail remains the authoritative evidence path.
         pass
+
+    status = "ok" if answer else "empty"
+    _append_provider_log(
+        settings,
+        {
+            "request_id": request_id,
+            "status": status,
+            "trace_id": trace_id,
+            "versionset_id": versionset_id,
+            "prompt_digest": prompt_component.get("digest"),
+            "kb_manifest_digest": kb_component.get("digest"),
+            "model_digest": model_component.get("digest"),
+            "answer_digest": "sha256:" + hashlib.sha256(answer.encode("utf-8")).hexdigest(),
+        },
+    )
 
     return {
         "request_id": request_id,
@@ -190,6 +249,6 @@ def evaluate_versionset(
         "kb_manifest_digest": kb_component.get("digest"),
         "model_digest": model_component.get("digest"),
         "retrieval": [],
-        "status": "ok" if answer else "empty",
-        "trace_id": None,
+        "status": status,
+        "trace_id": trace_id,
     }

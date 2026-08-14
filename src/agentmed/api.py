@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import Body, FastAPI, Header, HTTPException, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from agentmed.adapters import langfuse as langfuse_adapter
@@ -364,6 +364,23 @@ def get_versionset_endpoint(
     settings = load_settings()
     require_eval_token(settings, authorization)
     return get_versionset_record(settings, versionset_id)
+
+
+@app.get("/v2/logs")
+def provider_logs_endpoint(
+    request_id: str = Query(..., min_length=8),
+    limit: int = Query(default=2, ge=1, le=50),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """CaseLoop provider-log read: exactly-one log lookup by request_id."""
+    from agentmed.evaluate import get_provider_log
+    from agentmed.evaluate import require_eval_token
+
+    settings = load_settings()
+    require_eval_token(settings, authorization)
+    page = get_provider_log(settings, request_id)
+    page["items"] = page["items"][:limit]
+    return page
 
 
 class IngestBody(BaseModel):

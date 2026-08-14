@@ -62,6 +62,7 @@ class Observability:
         usage: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         tags: list[str] | None = None,
+        trace_id: str | None = None,
     ) -> None:
         if not self.enabled or self.client is None:
             return
@@ -80,10 +81,13 @@ class Observability:
             }
             if tags:
                 kwargs["tags"] = tags
+            if trace_id:
+                kwargs["trace_context"] = {"trace_id": trace_id}
             try:
                 observation = self.client.start_observation(**kwargs)
             except TypeError:
-                kwargs.pop("tags", None)
+                for key in ("tags", "trace_context"):
+                    kwargs.pop(key, None)
                 try:
                     observation = self.client.start_observation(**kwargs)
                 except TypeError:
