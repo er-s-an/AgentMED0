@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from agentmed.adapters.langfuse import LangfuseUnavailable
 from agentmed.kernel import ROLE_PRINCIPALS
+from tests.conftest import KOTAEMON_ACCEPT
 
 
 def _client(tmp_path, monkeypatch) -> TestClient:
@@ -118,7 +119,7 @@ def test_connect_observability_missing_receipt(tmp_path, monkeypatch) -> None:
     response = client.post(
         f"/v1/cases/{case_id}/observability-connect",
         headers={"X-AgentMED-Principal": ROLE_PRINCIPALS["investigator"]},
-        json={},
+        json=KOTAEMON_ACCEPT,
     )
     assert response.status_code == 200, response.text
     body = response.json()
@@ -133,7 +134,7 @@ def test_verifier_context_withholds_builder_cot(tmp_path, monkeypatch) -> None:
     client.post(
         f"/v1/cases/{case_id}/accept",
         headers={"X-AgentMED-Principal": "human:cli"},
-        json={},
+        json=KOTAEMON_ACCEPT,
     )
     client.post(
         f"/v1/cases/{case_id}/investigate",
@@ -142,7 +143,7 @@ def test_verifier_context_withholds_builder_cot(tmp_path, monkeypatch) -> None:
     client.post(
         f"/v1/cases/{case_id}/attribute",
         headers={"X-AgentMED-Principal": ROLE_PRINCIPALS["attribution"]},
-        json={},
+        json=KOTAEMON_ACCEPT,
     )
     builder = client.get(
         f"/v1/cases/{case_id}/builder-context",
@@ -226,7 +227,7 @@ def test_get_evidence_redacts_builder_fields_for_verifier(tmp_path, monkeypatch)
     client.post(
         f"/v1/cases/{case_id}/accept",
         headers={"X-AgentMED-Principal": "human:cli"},
-        json={},
+        json=KOTAEMON_ACCEPT,
     )
     client.post(
         f"/v1/cases/{case_id}/investigate",
@@ -235,7 +236,7 @@ def test_get_evidence_redacts_builder_fields_for_verifier(tmp_path, monkeypatch)
     client.post(
         f"/v1/cases/{case_id}/attribute",
         headers={"X-AgentMED-Principal": ROLE_PRINCIPALS["attribution"]},
-        json={},
+        json=KOTAEMON_ACCEPT,
     )
     client.post(
         f"/v1/cases/{case_id}/candidates",
@@ -248,7 +249,9 @@ def test_get_evidence_redacts_builder_fields_for_verifier(tmp_path, monkeypatch)
     )
     as_lead = client.get(f"/v1/cases/{case_id}/evidence")
     assert as_lead.status_code == 200
-    assert "SECRET_BUILDER_REASONING" in json.dumps(as_lead.json().get("candidates") or [])
+    lead_candidates = json.dumps(as_lead.json().get("candidates") or [])
+    assert "SECRET_BUILDER_REASONING" not in lead_candidates
+    assert "---" in lead_candidates and "+++" in lead_candidates
     as_verifier = client.get(
         f"/v1/cases/{case_id}/evidence",
         headers={"X-AgentMED-Principal": ROLE_PRINCIPALS["verifier"]},
@@ -256,6 +259,7 @@ def test_get_evidence_redacts_builder_fields_for_verifier(tmp_path, monkeypatch)
     assert as_verifier.status_code == 200
     payload = as_verifier.json()
     assert "audit" not in payload
+    assert "diff" not in (payload.get("candidates") or [{}])[0]
     assert "SECRET_BUILDER_REASONING" not in json.dumps(payload.get("candidates") or [])
     assert "withheld" in payload["note"].lower() or "chain-of-thought" in payload["note"].lower()
     assert payload["candidates"][0]["files"]["lightrag_store.py"].startswith("class LightRAGStore")

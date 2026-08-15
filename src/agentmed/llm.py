@@ -24,8 +24,12 @@ class LLM:
         tool_handler: Callable[[str, dict[str, Any]], str] | None = None,
         max_turns: int = 8,
     ) -> str:
+        from agentmed.langfuse_bus import resolve_prompt
+
+        resolved = resolve_prompt(self.settings, role)
+        system_text = resolved.get("prompt") or system
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system},
+            {"role": "system", "content": system_text},
             {"role": "user", "content": user},
         ]
         for _ in range(max_turns):
@@ -54,6 +58,9 @@ class LLM:
                     "product": "agentmed",
                     "plane": "governance",
                     "source": "playbook",
+                    "prompt_name": resolved.get("name"),
+                    "prompt_version": resolved.get("version"),
+                    "prompt_source": resolved.get("source"),
                 },
                 tags=["agentmed-governance", "agentmed", role],
             )

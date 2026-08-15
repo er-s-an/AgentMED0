@@ -162,6 +162,16 @@ MVP **不跑 kotaemon 全量 UI**。按 Adapter 原则，用可复现的失败�
 
 这样 Gate 不依赖付费模型，也能证明 base fail → candidate pass → known-bad 拦截。
 
+### 4.2 Workload Adapter
+
+换一个被治理应用的边界是 **Workload Adapter**，不是复制 `lightrag_store.py` 或 Gate 里的文件名。`AIApplication.slug` 决定用哪一套 `base_files` / `golden_files` / `known_bad_files` / 冻结 `eval/` / `allowed_files`。kotaemon 是第一个实现，登记在 `GET /v1/workloads`。没有 slug 时默认 kotaemon；未知 slug 失败，不静默落到 kotaemon。
+
+Builder 只改 `allowed_files`。候选可以只交 `files`；Kernel 在 diff 为空或不像 unified diff 时按 base→files 生成补丁。`draft.patch` 必须能当补丁读。
+
+同一应用下已关闭 Case 的 `RegressionAsset` 会进入下一次 Gate 的 `evidence.prior_regression_assets`（引用，不改评测判定）。质量官每步先 `GET /v1/cases/{id}/next`，只派 Kernel 指出的那一步。
+
+VerifiedCandidate 可以再打一份**给人看的上游 PR 包**（`agentmed pr pack` / `GET /v1/cases/{id}/pr-pack`）：harness 证据与 kotaemon 真实路径的 `upstream.patch` 分列。Kernel 和 AgentTeams **不会** `gh pr create`。人读完包之后自己跑 `agentmed pr submit CASE --i-am-human`。
+
 ---
 
 ## 5. 权威对象与状态
@@ -173,13 +183,15 @@ Kernel 拥有这些对象。Agent 只能通过 typed Task 提交，Kernel 校验
 | `AIApplication` | 被治理应用的轻量身份 |
 | `Signal` | 飞书 / GitHub / Langfuse 低分 / 人工 |
 | `Case` | 一次质量问题的权威工作空间 |
-| `AcceptanceSpec` | 经人确认的预期、badcase、判定方式 |
-| `VersionSnapshot` | 行为相关代码 / prompt / 模型 / 工具的不可变组合 |
+| `AcceptanceDraft` / `AcceptanceSpec` | 草稿可由 Agent 写；确认必须 `human:`，空确认是 409 |
+| `VersionSnapshot` | `components[]` 带 assurance：`IMMUTABLE_DIGEST` / `PROVIDER_VERSION` / `UNKNOWN` … |
+| `EpisodeSnapshot` | Gate 前封存；事后 `add_evidence` 不能改已封 digest |
 | `EvidenceReceipt` | 来源、完整性、缺失项、digest |
 | `InvestigationReport` | `SUPPORTED` / `REFUTED` / `INCONCLUSIVE` / `CONFOUNDED` |
 | `CandidateRevision` | 绑定 exact base，密封后不可原位改 |
-| `EvaluationPlan` / `GateReport` | 冻结验证与判定 |
+| `EvaluationPlan` / `GateReport` | `CANDIDATE_VERIFICATION` 与 `RELEASE_AUTHORIZATION` 分列 |
 | `VerifiedCandidate` | Gate `VERIFIED` 且明确 `NOT DEPLOYED` |
+| `ReleasePlan` / `WorkOrder` / `Approval` | 验证通过 ≠ 获准做本地 Shadow；无批准 `/release` 为 409 |
 | `WorkOrder` / `ExternalOperation` | 草稿 PR、Shadow、回滚 |
 | `Observation` | desired ≠ observed ≠ provider receipt |
 | `RegressionAsset` | 关闭后的版本化资产 |
@@ -200,6 +212,9 @@ awaiting_acceptance
 硬规则：
 
 - 无人类 `AcceptanceSpec` 不得形成 VerifiedCandidate
+- 未封 `EpisodeSnapshot` 不得 `verify`
+- `INCONCLUSIVE` / `CONFOUNDED` 不推进 `proposing`
+- 无 Approval 不得本地 Shadow；`/release` 只是 `/shadow` 别名
 - 只有 `agent:builder` 可提交 candidate
 - 只有 `agent:verifier` 可提交 GateReport
 - Builder 不得验证自己的 candidate
@@ -226,7 +241,9 @@ awaiting_acceptance
 - AgentMED 各角色的 trace 可被后续角色查询（诊断同伴，而不是共享思维链全文）
 - 被治理应用登记后自动创建 Langfuse project + OTLP 端点
 - 若目标已有 OTEL：只改 exporter
-- 若没有：由 Integrator / Intake 起草 instrumentation，人批后再合（MVP 对 kotaemon harness 直接埋点或跳过目标应用 live trace，用 Issue + 代码证据）
+- Worker LLM 默认走 Kernel `POST /v1/chat/completions`，generation 带 role / prompt version / case_id
+- `investigate` 必须先查 Langfuse，并复现失败查询写成 target span；查不到记 missing，禁止伪造，也禁止跳过查询
+- kotaemon harness 的 scoped query 是真实执行，不是编出来的 span
 
 Langfuse 挂了：Kernel 继续工作；诊断工具返回 `NEEDS_CONTEXT`，不得伪造 span。
 
@@ -317,7 +334,7 @@ Secrets 只存引用。Worker 不持有 GitHub PAT / 模型主密钥；与 Agent
 
 ## 11. 验收（First Verified Fix）
 
-一次 `agentmed run --signal <kotaemon #758> --accept` 必须同时满足：
+一次 `agentmed run --signal <kotaemon #758> --accept-adapter-defaults`（或 `--accept --expected ... --badcase ...`）必须同时满足：
 
 1. 同 Issue 重试不重复立案
 2. AcceptanceSpec 有 `human:` principal

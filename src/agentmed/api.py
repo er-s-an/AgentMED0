@@ -5,6 +5,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from agentmed.adapters import langfuse as langfuse_adapter
@@ -20,20 +21,17 @@ from agentmed.adapters.langfuse import (
 from agentmed.llm_proxy import models_payload, proxy_chat
 from agentmed.prompt_catalog import catalog_summary, harvest_prompts
 from agentmed.config import load_settings
-from agentmed.gate import base_source
-from agentmed.kernel import ROLE_PRINCIPALS, Kernel, KernelError
+from agentmed.kernel import CONFLICT_CODES, ROLE_PRINCIPALS, Kernel, KernelError
 from agentmed.release import verify_candidate, write_draft_patch, write_shadow_and_rollback
 from agentmed.store import Store
-from agentmed.workload import (
-    ATTRIBUTE_HYPOTHESIS,
-    DEFAULT_BADCASE,
-    DEFAULT_EXPECTED,
-    DEFAULT_JUDGE,
-    KOTAEMON_COMMIT,
-    KOTAEMON_REPO,
-    KOTAEMON_SNAPSHOT,
-    WORKLOAD,
-)
+from agentmed.workload import ATTRIBUTE_HYPOTHESIS
+from agentmed.langfuse_bus import collect_investigation_evidence
+from agentmed.prpack import build_pr_pack
+from agentmed.review import case_review
+from agentmed.workloads import UnknownWorkload, adapter_for_case, get_adapter, list_adapters, resolve_workload_slug
+from agentmed.workloads.base import filter_allowed, looks_like_unified_diff, unified_files_diff
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 load_dotenv()
 
@@ -60,10 +58,42 @@ _GOVERNANCE_READERS = {
 }
 
 
+def _candidate_files(body: CandidateBody) -> dict[str, str]:
+    files = dict(body.files or {})
+    if body.lightrag_store_py:
+        files.setdefault("lightrag_store.py", body.lightrag_store_py)
+    if not files:
+        raise HTTPException(status_code=400, detail="files or lightrag_store_py required")
+    return files
+
+
+def _adapter(kernel: Kernel, case: dict[str, Any]):
+    try:
+        return adapter_for_case(kernel, case)
+    except UnknownWorkload as exc:
+        raise HTTPException(status_code=400, detail=f"unknown workload: {exc}") from exc
+
+
 def _kernel() -> Kernel:
     settings = load_settings()
     store = Store(settings.database_url, Path(settings.agentmed_data_dir))
     return Kernel(store)
+
+
+def _raise_kernel(exc: KernelError, *, kernel: Kernel | None = None, case_id: str | None = None) -> None:
+    code = exc.code if exc.code in CONFLICT_CODES else None
+    status = 409 if code else 400
+    detail: dict[str, Any] | str
+    if code:
+        detail = {"code": code, "reason": str(exc), **exc.extra}
+        if kernel and case_id:
+            try:
+                detail["next"] = kernel.next_actions(case_id)
+            except KernelError:
+                pass
+    else:
+        detail = str(exc)
+    raise HTTPException(status_code=status, detail=detail) from exc
 
 
 def _require(principal: str | None, allowed: set[str]) -> str:
@@ -313,6 +343,38 @@ def health() -> dict:
     return {"kernel": "ok"}
 
 
+@app.get("/")
+def review_home() -> FileResponse:
+    return FileResponse(STATIC_DIR / "review.html")
+
+
+@app.get("/v1/workloads")
+def list_workloads() -> dict[str, Any]:
+    return {"workloads": [spec.as_dict() for spec in list_adapters()]}
+
+
+@app.get("/v1/applications")
+def list_applications() -> dict[str, Any]:
+    return {"applications": _kernel().store.list("applications")}
+
+
+@app.get("/v1/capabilities")
+def capabilities() -> dict[str, Any]:
+    return {
+        "intents": [
+            "capabilities.get",
+            "signals.submit",
+            "cases.get",
+            "cases.timeline",
+            "candidates.submit",
+            "evidence.get",
+            "gate-reports.get",
+        ],
+        "forbidden": ["approvals.decide", "shadow.execute", "release.execute"],
+        "note": "MCP and HTTP share these intents. Approvals and execute stay off the gateway.",
+    }
+
+
 @app.get("/v1/models")
 @app.get("/v1/llm/models")
 def llm_models() -> dict[str, Any]:
@@ -404,6 +466,7 @@ def provider_logs_endpoint(
 
 class IngestBody(BaseModel):
     url: str
+    slug: str | None = None
     title: str | None = None
     summary: str | None = None
     expected_behavior: str | None = None
@@ -415,6 +478,7 @@ class LangfuseIngestBody(BaseModel):
     min_score: float | None = None
     failed_only: bool = True
     window: str | None = None
+    slug: str | None = None
 
 
 class EvidenceBody(BaseModel):
@@ -436,9 +500,10 @@ class LangfuseEvidenceBody(BaseModel):
 
 
 class AcceptBody(BaseModel):
-    expected_behavior: str = DEFAULT_EXPECTED
-    badcase_input: str = DEFAULT_BADCASE
-    judge: str = DEFAULT_JUDGE
+    expected_behavior: str | None = None
+    badcase_input: str | None = None
+    judge: str | None = None
+    confirm_adapter_defaults: bool = False
 
 
 class AttributeBody(BaseModel):
@@ -447,24 +512,38 @@ class AttributeBody(BaseModel):
     uncertainty: str = (
         "skipped heavy factorial experiment; issue author already pointed to insert/query call sites"
     )
+    force_skip: bool = False
+
+
+class AcceptanceDraftBody(BaseModel):
+    expected_behavior: str
+    badcase_input: str
+    judge: str = ""
+
+
+class ReleasePlanBody(BaseModel):
+    rollout: str = "local_shadow"
+    rollback: str = "restore_base"
+    observed: str = "reread_files"
+
+
+class ApprovalBody(BaseModel):
+    work_order_id: str
+    decision: str = "approve"
 
 
 class CandidateBody(BaseModel):
     summary: str
     diff: str = ""
-    lightrag_store_py: str
+    files: dict[str, str] | None = None
+    lightrag_store_py: str | None = None
     risk: str = "low"
 
 
 class CloseBody(BaseModel):
     summary: str
-    probes: list[str] = Field(
-        default_factory=lambda: ["eval/test_file_scope.py", "eval/test_empty_selection.py"]
-    )
-    lessons: str = (
-        "Always pass and persist file_id at insert; query must filter chunks by selected "
-        "file_ids; empty selection must return no chunks."
-    )
+    probes: list[str] | None = None
+    lessons: str | None = None
 
 
 @app.post("/v1/signals/ingest")
@@ -479,8 +558,13 @@ def ingest_signal(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"github ingest failed: {exc}") from exc
     kernel = _kernel()
-    app_row = kernel.ensure_app(slug="kotaemon", name="kotaemon", repo=KOTAEMON_REPO)
-    title = body.title or issue.get("title") or "kotaemon file scope"
+    try:
+        slug = resolve_workload_slug(url=body.url, explicit=body.slug)
+        adapter = get_adapter(slug)
+    except UnknownWorkload as exc:
+        raise HTTPException(status_code=400, detail=f"unknown workload: {exc}") from exc
+    app_row = kernel.ensure_app(slug=adapter.spec.slug, name=adapter.spec.name, repo=adapter.spec.repo)
+    title = body.title or issue.get("title") or adapter.spec.name
     signal = kernel.ingest_signal(
         principal=principal,
         source_type="github_issue",
@@ -491,15 +575,25 @@ def ingest_signal(
         raw=issue,
     )
     case = kernel.open_case(principal=principal, signal=signal, application=app_row)
+    draft_spec = {
+        "expected_behavior": body.expected_behavior or adapter.spec.default_expected,
+        "badcase_input": body.badcase_input or adapter.spec.default_badcase,
+        "judge": body.judge or adapter.spec.default_judge,
+    }
+    draft = kernel.propose_acceptance(
+        principal=principal,
+        case_id=case["id"],
+        expected_behavior=draft_spec["expected_behavior"],
+        badcase_input=draft_spec["badcase_input"],
+        judge=draft_spec["judge"],
+    )
     return {
         "signal": signal,
         "case": case,
         "issue": {"url": issue.get("url"), "title": issue.get("title"), "number": issue.get("number")},
-        "draft_spec": {
-            "expected_behavior": body.expected_behavior or DEFAULT_EXPECTED,
-            "badcase_input": body.badcase_input or DEFAULT_BADCASE,
-            "judge": body.judge or DEFAULT_JUDGE,
-        },
+        "draft_spec": draft_spec,
+        "acceptance_draft": draft,
+        "next": kernel.next_actions(case["id"]),
     }
 
 
@@ -522,7 +616,12 @@ def ingest_langfuse(
     if not picked:
         return _langfuse_needs_context()
     kernel = _kernel()
-    app_row = kernel.ensure_app(slug="kotaemon", name="kotaemon", repo=KOTAEMON_REPO)
+    try:
+        slug = resolve_workload_slug(explicit=params.slug)
+        adapter = get_adapter(slug)
+    except UnknownWorkload as exc:
+        raise HTTPException(status_code=400, detail=f"unknown workload: {exc}") from exc
+    app_row = kernel.ensure_app(slug=adapter.spec.slug, name=adapter.spec.name, repo=adapter.spec.repo)
     signal = kernel.ingest_signal(
         principal=principal,
         source_type="langfuse_eval",
@@ -873,6 +972,8 @@ def draft_pr(
             "patch": drafted["patch"],
             "operations": [drafted["operation"]],
         }
+    except UnknownWorkload as exc:
+        raise HTTPException(status_code=400, detail=f"unknown workload: {exc}") from exc
     except KernelError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -884,8 +985,62 @@ def accept_case(
     x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
 ) -> dict[str, Any]:
     principal = _require(x_agentmed_principal, {"human:*"})
+    kernel = _kernel()
     try:
-        spec = _kernel().confirm_acceptance(
+        case = kernel._case(case_id)
+        adapter = _adapter(kernel, case)
+        expected = (body.expected_behavior or "").strip()
+        badcase = (body.badcase_input or "").strip()
+        judge = (body.judge or "").strip()
+        via = "human"
+        if body.confirm_adapter_defaults:
+            expected = expected or adapter.spec.default_expected
+            badcase = badcase or adapter.spec.default_badcase
+            judge = judge or adapter.spec.default_judge
+            via = "adapter_defaults"
+        if not expected or not badcase:
+            draft = kernel.store.get("acceptance_drafts", case.get("acceptance_draft_id") or "")
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "NEEDS_ACCEPTANCE_CRITERIA",
+                    "reason": "A human must send expected_behavior and badcase_input, or confirm_adapter_defaults.",
+                    "draft": draft
+                    or {
+                        "expected_behavior": adapter.spec.default_expected,
+                        "badcase_input": adapter.spec.default_badcase,
+                        "judge": adapter.spec.default_judge,
+                    },
+                    "next": kernel.next_actions(case_id),
+                },
+            )
+        spec = kernel.confirm_acceptance(
+            principal=principal,
+            case_id=case_id,
+            expected_behavior=expected,
+            badcase_input=badcase,
+            judge=judge,
+            confirmed_via=via,
+        )
+    except KernelError as exc:
+        _raise_kernel(exc, kernel=kernel, case_id=case_id)
+    return spec
+
+
+@app.post("/v1/cases/{case_id}/acceptance-draft")
+def acceptance_draft(
+    case_id: str,
+    body: AcceptanceDraftBody,
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    principal = _require(
+        x_agentmed_principal,
+        {ROLE_PRINCIPALS["intake"], ROLE_PRINCIPALS["investigator"], ROLE_PRINCIPALS["lead"]},
+    )
+    kernel = _kernel()
+    try:
+        kernel._case(case_id)
+        return kernel.propose_acceptance(
             principal=principal,
             case_id=case_id,
             expected_behavior=body.expected_behavior,
@@ -893,8 +1048,7 @@ def accept_case(
             judge=body.judge,
         )
     except KernelError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return spec
+        _raise_kernel(exc, kernel=kernel, case_id=case_id)
 
 
 @app.post("/v1/cases/{case_id}/investigate")
@@ -906,32 +1060,88 @@ def investigate(
     kernel = _kernel()
     try:
         case = kernel._case(case_id)
+        adapter = _adapter(kernel, case)
         if case.get("version_snapshot_id"):
             snapshot = kernel.store.get("version_snapshots", case["version_snapshot_id"])
+            signal = kernel.store.get("signals", case["signal_id"]) or {}
+            has_langfuse = any(
+                item.get("kind") == "langfuse_traces"
+                for item in kernel.store.list("evidence")
+                if item.get("case_id") == case_id
+            )
+            collected = None
+            if not has_langfuse:
+                collected = collect_investigation_evidence(
+                    kernel,
+                    principal=principal,
+                    case_id=case_id,
+                    adapter=adapter,
+                    signal=signal,
+                )
+            episode = kernel.seal_episode(
+                principal=principal,
+                case_id=case_id,
+                coverage={
+                    "github": True,
+                    "langfuse_queried": bool((collected or {}).get("queried")) or has_langfuse,
+                    "reused": True,
+                },
+                extra_missing=list((collected or {}).get("missing") or []),
+            )
             return {
                 "snapshot": snapshot,
-                "evidence": None,
+                "episode_snapshot": episode,
+                "evidence": (collected or {}).get("langfuse_evidence"),
                 "reused": True,
-                "workload": WORKLOAD,
-                "commit": KOTAEMON_COMMIT,
+                "langfuse": {
+                    "queried": (collected or {}).get("queried"),
+                    "needs_context": (collected or {}).get("needs_context"),
+                    "missing": (collected or {}).get("missing") or [],
+                    "reused_without_query": collected is None,
+                },
+                "workload": adapter.spec.path,
+                "commit": adapter.spec.commit,
             }
         signal = kernel.store.get("signals", case["signal_id"]) or {}
         snapshot = kernel.bind_version_snapshot(
             principal=principal,
             case_id=case_id,
-            manifest={**KOTAEMON_SNAPSHOT, "issue": signal.get("source_ref")},
+            manifest=adapter.snapshot_manifest(signal.get("source_ref")),
         )
-        evidence = kernel.add_evidence(
+        collected = collect_investigation_evidence(
+            kernel,
             principal=principal,
             case_id=case_id,
-            kind="github_issue",
-            summary=f"Upstream issue {signal.get('source_ref')}: {signal.get('title')}",
-            artifacts=[{"type": "github_issue", "url": signal.get("source_ref"), "title": signal.get("title")}],
-            missing=["target_app_langfuse_traces"],
+            adapter=adapter,
+            signal=signal,
+        )
+        episode = kernel.seal_episode(
+            principal=principal,
+            case_id=case_id,
+            coverage={
+                "github": bool(collected.get("github_evidence")),
+                "langfuse_queried": bool(collected.get("queried")),
+                "langfuse_needs_context": bool(collected.get("needs_context")),
+            },
+            extra_missing=list(collected.get("missing") or []),
         )
     except KernelError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"snapshot": snapshot, "evidence": evidence, "workload": WORKLOAD, "commit": KOTAEMON_COMMIT}
+        _raise_kernel(exc, kernel=kernel, case_id=case_id)
+    return {
+        "snapshot": snapshot,
+        "episode_snapshot": episode,
+        "evidence": collected.get("langfuse_evidence"),
+        "github_evidence": collected.get("github_evidence"),
+        "langfuse": {
+            "queried": collected.get("queried"),
+            "needs_context": collected.get("needs_context"),
+            "missing": collected.get("missing"),
+            "target_traces": collected.get("target_traces"),
+            "episode_logged": collected.get("episode_logged"),
+        },
+        "workload": adapter.spec.path,
+        "commit": adapter.spec.commit,
+    }
 
 
 @app.post("/v1/cases/{case_id}/attribute")
@@ -948,9 +1158,10 @@ def attribute(
             hypothesis=body.hypothesis,
             conclusion=body.conclusion,
             uncertainty=body.uncertainty,
+            force_skip=body.force_skip,
         )
     except KernelError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _raise_kernel(exc, case_id=case_id)
 
 
 @app.get("/v1/cases/{case_id}/builder-context")
@@ -962,8 +1173,11 @@ def builder_context(
     kernel = _kernel()
     try:
         bundle = kernel.export_case(case_id)
+        case = bundle.get("case") or kernel._case(case_id)
+        adapter = _adapter(kernel, case)
     except KernelError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    files = adapter.base_files()
     return {
         "case_id": case_id,
         "acceptance_spec": bundle.get("acceptance_spec"),
@@ -973,12 +1187,10 @@ def builder_context(
             "body": (bundle.get("signal") or {}).get("body"),
             "source_ref": (bundle.get("signal") or {}).get("source_ref"),
         },
-        "lightrag_store_py": base_source(),
-        "instruction": (
-            "Return a full replacement for lightrag_store.py. insert must persist file_id; "
-            "query(file_ids=...) must return only matching chunks; empty file_ids must return []. "
-            "Do not include eval/ tests. POST the file to /v1/cases/{id}/candidates."
-        ),
+        "files": files,
+        "allowed_files": list(adapter.spec.allowed_files),
+        "lightrag_store_py": files.get("lightrag_store.py", ""),
+        "instruction": adapter.spec.builder_instruction,
     }
 
 
@@ -989,15 +1201,24 @@ def submit_candidate(
     x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
 ) -> dict[str, Any]:
     principal = _require(x_agentmed_principal, {ROLE_PRINCIPALS["builder"]})
+    kernel = _kernel()
     try:
-        return _kernel().submit_candidate(
+        case = kernel._case(case_id)
+        adapter = _adapter(kernel, case)
+        files = filter_allowed(_candidate_files(body), adapter.spec.allowed_files)
+        diff = body.diff
+        if not looks_like_unified_diff(diff):
+            diff = unified_files_diff(adapter.base_files(), {**adapter.base_files(), **files})
+        return kernel.submit_candidate(
             principal=principal,
             case_id=case_id,
             summary=body.summary,
-            diff=body.diff,
-            files={"lightrag_store.py": body.lightrag_store_py},
+            diff=diff,
+            files=files,
             risk=body.risk,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KernelError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1041,8 +1262,104 @@ def verify(
         if not candidate:
             raise KernelError("candidate missing")
         return verify_candidate(kernel, case_id, candidate)
+    except UnknownWorkload as exc:
+        raise HTTPException(status_code=400, detail=f"unknown workload: {exc}") from exc
     except KernelError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _raise_kernel(exc, kernel=kernel, case_id=case_id)
+
+
+def _shadow_with_approval(kernel: Kernel, case_id: str, principal: str) -> dict[str, Any]:
+    granted = kernel.require_unused_approval(case_id)
+    kernel.consume_work_order(principal=principal, work_order_id=granted["work_order"]["id"])
+    case = kernel._case(case_id)
+    candidate_id = case.get("candidate_id")
+    if not candidate_id:
+        raise KernelError("no candidate")
+    candidate = kernel.store.get("candidates", candidate_id)
+    settings = load_settings()
+    runtime = Path(settings.agentmed_data_dir) / "runtime" / case_id
+    return write_shadow_and_rollback(kernel, case_id, candidate, runtime)
+
+
+@app.post("/v1/cases/{case_id}/release-plans")
+def create_release_plan(
+    case_id: str,
+    body: ReleasePlanBody | None = None,
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    principal = _require(
+        x_agentmed_principal,
+        {ROLE_PRINCIPALS["lead"], ROLE_PRINCIPALS["controller"], "human:*"},
+    )
+    body = body or ReleasePlanBody()
+    kernel = _kernel()
+    try:
+        plan = kernel.create_release_plan(
+            principal=principal,
+            case_id=case_id,
+            rollout=body.rollout,
+            rollback=body.rollback,
+            observed=body.observed,
+        )
+        return {"plan": plan, "next": kernel.next_actions(case_id)}
+    except KernelError as exc:
+        _raise_kernel(exc, kernel=kernel, case_id=case_id)
+
+
+@app.post("/v1/cases/{case_id}/gates/release-authorization")
+def release_authorization(
+    case_id: str,
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    principal = _require(
+        x_agentmed_principal,
+        {ROLE_PRINCIPALS["lead"], ROLE_PRINCIPALS["verifier"], ROLE_PRINCIPALS["controller"]},
+    )
+    kernel = _kernel()
+    try:
+        authorized = kernel.authorize_release(principal=principal, case_id=case_id)
+        authorized["next"] = kernel.next_actions(case_id)
+        return authorized
+    except KernelError as exc:
+        _raise_kernel(exc, kernel=kernel, case_id=case_id)
+
+
+@app.post("/v1/cases/{case_id}/approvals")
+def approve_work_order(
+    case_id: str,
+    body: ApprovalBody,
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    principal = _require(x_agentmed_principal, {"human:*"})
+    kernel = _kernel()
+    try:
+        approval = kernel.approve_work_order(
+            principal=principal,
+            case_id=case_id,
+            work_order_id=body.work_order_id,
+            decision=body.decision,
+        )
+        return {"approval": approval, "next": kernel.next_actions(case_id)}
+    except KernelError as exc:
+        _raise_kernel(exc, kernel=kernel, case_id=case_id)
+
+
+@app.post("/v1/cases/{case_id}/shadow")
+def shadow(
+    case_id: str,
+    x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
+) -> dict[str, Any]:
+    principal = _require(
+        x_agentmed_principal,
+        {ROLE_PRINCIPALS["controller"], ROLE_PRINCIPALS["lead"]},
+    )
+    kernel = _kernel()
+    try:
+        return _shadow_with_approval(kernel, case_id, principal)
+    except UnknownWorkload as exc:
+        raise HTTPException(status_code=400, detail=f"unknown workload: {exc}") from exc
+    except KernelError as exc:
+        _raise_kernel(exc, kernel=kernel, case_id=case_id)
 
 
 @app.post("/v1/cases/{case_id}/release")
@@ -1054,19 +1371,13 @@ def release(
         x_agentmed_principal,
         {ROLE_PRINCIPALS["controller"], ROLE_PRINCIPALS["lead"]},
     )
-    del principal
-    settings = load_settings()
     kernel = _kernel()
     try:
-        case = kernel._case(case_id)
-        candidate_id = case.get("candidate_id")
-        if not candidate_id:
-            raise KernelError("no candidate")
-        candidate = kernel.store.get("candidates", candidate_id)
-        runtime = Path(settings.agentmed_data_dir) / "runtime" / case_id
-        return write_shadow_and_rollback(kernel, case_id, candidate, runtime)
+        return _shadow_with_approval(kernel, case_id, principal)
+    except UnknownWorkload as exc:
+        raise HTTPException(status_code=400, detail=f"unknown workload: {exc}") from exc
     except KernelError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _raise_kernel(exc, kernel=kernel, case_id=case_id)
 
 
 @app.post("/v1/cases/{case_id}/close")
@@ -1076,13 +1387,16 @@ def close_case(
     x_agentmed_principal: str | None = Header(default=None, alias="X-AgentMED-Principal"),
 ) -> dict[str, Any]:
     principal = _require(x_agentmed_principal, {ROLE_PRINCIPALS["curator"]})
+    kernel = _kernel()
     try:
-        return _kernel().close_with_asset(
+        case = kernel._case(case_id)
+        adapter = _adapter(kernel, case)
+        return kernel.close_with_asset(
             principal=principal,
             case_id=case_id,
             summary=body.summary,
-            probes=body.probes,
-            lessons=body.lessons,
+            probes=body.probes if body.probes is not None else list(adapter.spec.default_probes),
+            lessons=body.lessons if body.lessons is not None else adapter.spec.default_lessons,
         )
     except KernelError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1104,6 +1418,55 @@ def get_case(case_id: str) -> dict:
     except KernelError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return bundle.get("case") or bundle
+
+
+@app.get("/v1/cases/{case_id}/next")
+def case_next(case_id: str) -> dict[str, Any]:
+    kernel = _kernel()
+    try:
+        case = kernel._case(case_id)
+        adapter = _adapter(kernel, case)
+        return {
+            "case_id": case_id,
+            "state": case.get("state"),
+            "next": kernel.next_actions(case_id),
+            "workload": adapter.spec.as_dict(),
+        }
+    except KernelError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/v1/cases/{case_id}/review")
+def review_case(case_id: str) -> dict[str, Any]:
+    settings = load_settings()
+    kernel = _kernel()
+    try:
+        return case_review(kernel, case_id, data_dir=Path(settings.agentmed_data_dir))
+    except UnknownWorkload as exc:
+        raise HTTPException(status_code=400, detail=f"unknown workload: {exc}") from exc
+    except KernelError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/v1/cases/{case_id}/pr-pack")
+def get_pr_pack(case_id: str) -> dict[str, Any]:
+    settings = load_settings()
+    kernel = _kernel()
+    try:
+        packed = build_pr_pack(kernel, case_id, data_dir=Path(settings.agentmed_data_dir))
+    except UnknownWorkload as exc:
+        raise HTTPException(status_code=400, detail=f"unknown workload: {exc}") from exc
+    except KernelError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    files = packed["files"]
+    return {
+        "manifest": packed["manifest"],
+        "pack_dir": packed["pack_dir"],
+        "pr_md": files.get("PR.md", ""),
+        "submit_md": files.get("SUBMIT.md", ""),
+        "upstream_patch": files.get("upstream.patch", ""),
+        "harness_patch": files.get("harness.patch", ""),
+    }
 
 
 @app.get("/v1/cases/{case_id}/evidence")

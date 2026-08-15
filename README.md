@@ -40,7 +40,7 @@ agentmed serve
 `doctor` 只看依赖齐不齐。齐了再跑：
 
 ```bash
-agentmed run --signal https://github.com/Cinnamon/kotaemon/issues/758 --accept
+agentmed run --signal https://github.com/Cinnamon/kotaemon/issues/758 --accept-adapter-defaults
 agentmed case show CASE_ID
 agentmed evidence export CASE_ID
 ```
@@ -77,7 +77,7 @@ REQUIRE_LIVE=false pytest -q
 agentmed doctor
 agentmed serve
 
-agentmed run --signal https://github.com/Cinnamon/kotaemon/issues/758 --accept
+agentmed run --signal https://github.com/Cinnamon/kotaemon/issues/758 --accept-adapter-defaults
 agentmed case show CASE_ID
 agentmed evidence export CASE_ID
 

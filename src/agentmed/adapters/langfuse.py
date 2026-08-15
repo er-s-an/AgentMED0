@@ -104,8 +104,6 @@ def fetch_langfuse(
     from_ts = _from_timestamp(window)
     if from_ts:
         params["fromTimestamp"] = from_ts
-    if case_id:
-        params["filter"] = case_id
     base = host.rstrip("/")
     auth = (public_key, secret_key)
     try:
@@ -124,7 +122,76 @@ def fetch_langfuse(
         scores = []
     if not isinstance(traces, list):
         traces = []
+    if case_id:
+        traces = [item for item in traces if _mentions_case(item, case_id)]
+        scores = [item for item in scores if _mentions_case(item, case_id)]
     return {"scores": scores, "traces": traces}
+
+
+def _mentions_case(item: dict[str, Any], case_id: str) -> bool:
+    if not case_id:
+        return True
+    tags = {str(tag) for tag in (item.get("tags") or [])}
+    if case_id in tags:
+        return True
+    meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    if str(meta.get("case_id") or "") == case_id:
+        return True
+    blob = f"{item.get('name') or ''} {item.get('sessionId') or ''} {item.get('id') or ''}"
+    return case_id in blob
+
+
+def summarize_trace(item: dict[str, Any]) -> dict[str, Any]:
+    meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    return {
+        "id": item.get("id"),
+        "name": item.get("name"),
+        "tags": list(item.get("tags") or []),
+        "role": meta.get("role") or item.get("role"),
+        "plane": meta.get("plane"),
+        "case_id": meta.get("case_id"),
+    }
+
+
+def fetch_prompt(
+    *,
+    host: str,
+    public_key: str,
+    secret_key: str,
+    name: str,
+    label: str = "production",
+) -> dict[str, Any] | None:
+    """Read one Prompt Management record. None if missing or Langfuse is down."""
+    if not host or not public_key or not secret_key or not name:
+        return None
+    base = host.rstrip("/")
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(
+                f"{base}/api/public/v2/prompts/{name}",
+                params={"label": label},
+                auth=(public_key, secret_key),
+            )
+        if response.status_code >= 400:
+            return None
+        payload = response.json()
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    prompt = payload.get("prompt")
+    if isinstance(prompt, list):
+        prompt = "\n".join(
+            str(part.get("content") or part) if isinstance(part, dict) else str(part) for part in prompt
+        )
+    if not prompt:
+        return None
+    return {
+        "name": payload.get("name") or name,
+        "version": payload.get("version"),
+        "prompt": prompt,
+        "label": label,
+    }
 
 
 

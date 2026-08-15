@@ -26,7 +26,7 @@ kotaemon #758 Attribution 优先 `attribute-skip/scripts/run.sh`，不要做析�
 
 ## 调用条件
 
-需要目标应用 Langfuse 痕迹时。Verifier 仅在评测/目标相关查询时使用本 skill。
+`investigate` 已经会查一次 Langfuse 并复现失败查询。本 skill 是再读一遍（Attribution / Verifier 必跑）。没有 span 就 NEEDS_CONTEXT，禁止伪造。
 
 ## 依赖
 

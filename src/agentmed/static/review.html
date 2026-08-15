@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AgentMED Case Workspace</title>
+  <style>
+    :root {
+      --bg: #14120f;
+      --panel: #1e1b16;
+      --ink: #f3ead8;
+      --muted: #9a8f7a;
+      --line: #3a3428;
+      --ok: #7cba6a;
+      --bad: #d26a4a;
+      --wait: #d4a017;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.45 "IBM Plex Sans", "Source Han Sans SC", sans-serif;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    header strong { letter-spacing: 0.04em; }
+    header span { color: var(--muted); font-size: 13px; }
+    main { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 58px); }
+    aside { border-right: 1px solid var(--line); padding: 16px; }
+    section { padding: 20px 24px 48px; }
+    h2 { font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; }
+    article { border: 1px solid var(--line); background: var(--panel); padding: 12px 14px; margin: 12px 0; }
+    article h3 { margin: 0 0 8px; font-size: 14px; }
+    input, textarea, button {
+      font: inherit;
+      color: var(--ink);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 2px;
+    }
+    input, textarea { width: 100%; padding: 8px 10px; }
+    button { padding: 8px 12px; cursor: pointer; }
+    button.primary { background: #2a4a2a; border-color: #3d6a3d; }
+    .case, .app {
+      display: block;
+      width: 100%;
+      text-align: left;
+      margin: 0 0 8px;
+      padding: 8px 10px;
+    }
+    .case.active { border-color: var(--wait); }
+    .chip {
+      display: inline-block;
+      padding: 2px 7px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      margin: 0 6px 6px 0;
+    }
+    .chip.ok { color: var(--ok); border-color: #3d6a3d; }
+    .chip.bad { color: var(--bad); border-color: #7a3a2a; }
+    .chip.wait { color: var(--wait); border-color: #7a6418; }
+    pre {
+      background: #0e0d0b;
+      border: 1px solid var(--line);
+      padding: 12px;
+      overflow: auto;
+      font: 12px/1.4 "IBM Plex Mono", ui-monospace, monospace;
+      white-space: pre-wrap;
+    }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+    .banner {
+      border: 1px solid #7a6418;
+      background: #2a230e;
+      padding: 10px 12px;
+      margin: 12px 0;
+    }
+    label { display: block; color: var(--muted); font-size: 12px; margin: 10px 0 4px; }
+    .err { color: var(--bad); white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>AgentMED Case Workspace</strong>
+    <span>人确认验收、批准工单、生成 PR 包。出口是 VerifiedCandidate / NOT DEPLOYED。Shadow 只是本地回读。</span>
+  </header>
+  <main>
+    <aside>
+      <h2>Cases</h2>
+      <div id="cases"></div>
+      <h2>Applications</h2>
+      <div id="apps"></div>
+      <h2>报案</h2>
+      <label>GitHub Issue URL</label>
+      <input id="url" value="https://github.com/Cinnamon/kotaemon/issues/758" />
+      <label>slug（可空，kotaemon / langgraph 可推断）</label>
+      <input id="slug" placeholder="kotaemon" />
+      <div class="row">
+        <button class="primary" id="ingest">立案</button>
+        <button id="refresh">刷新</button>
+      </div>
+      <p class="err" id="aside-err"></p>
+    </aside>
+    <section>
+      <div id="empty">左边选一条 Case，或先立案。</div>
+      <div id="detail" hidden>
+        <div class="row" id="chips"></div>
+        <div class="banner" id="next-box"></div>
+        <div class="row" id="actions"></div>
+        <article>
+          <h3>Signal</h3>
+          <pre id="signal-box"></pre>
+        </article>
+        <article>
+          <h3>验收草稿 / 确认</h3>
+          <pre id="accept-box"></pre>
+          <label>expected_behavior</label>
+          <textarea id="expected" rows="3"></textarea>
+          <label>badcase_input</label>
+          <textarea id="badcase" rows="2"></textarea>
+          <label>judge</label>
+          <input id="judge" />
+          <div class="row">
+            <button class="primary" id="confirm-accept">人确认验收</button>
+          </div>
+        </article>
+        <article>
+          <h3>VersionSet assurance</h3>
+          <pre id="assurance-box"></pre>
+        </article>
+        <article>
+          <h3>Episode missing</h3>
+          <pre id="episode-box"></pre>
+        </article>
+        <article>
+          <h3>Candidate / Gate</h3>
+          <pre id="gate-box"></pre>
+        </article>
+        <article>
+          <h3>WorkOrder / Approval</h3>
+          <pre id="work-box"></pre>
+          <div class="row">
+            <button class="primary" id="approve-wo">批准当前工单</button>
+          </div>
+        </article>
+        <article>
+          <h3>Shadow 观察</h3>
+          <pre id="shadow-box"></pre>
+        </article>
+        <article>
+          <h3>PR 包</h3>
+          <div class="banner" id="pr-box">还没有生成。点下面按钮只写本地文件，不会开 PR。审查页不代交 Builder 对照补丁。</div>
+          <div class="row" id="surface-chips"></div>
+          <div class="row">
+            <button id="pr-pack">生成 PR 包</button>
+          </div>
+          <h3>harness.patch</h3>
+          <pre id="harness-patch">还没有 harness.patch</pre>
+          <h3>upstream.patch</h3>
+          <pre id="upstream-patch">还没有 upstream.patch</pre>
+          <pre id="pr-manifest"></pre>
+        </article>
+        <p class="err" id="detail-err"></p>
+      </div>
+    </section>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let selected = null;
+    let currentReview = null;
+
+    async function api(path, opts = {}) {
+      const headers = Object.assign({ "X-AgentMED-Principal": opts.principal || "human:cli" }, opts.headers || {});
+      if (opts.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+      const res = await fetch(path, {
+        method: opts.method || "GET",
+        headers,
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+      });
+      const text = await res.text();
+      let data;
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { detail: text }; }
+      if (!res.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : text || res.status);
+      return data;
+    }
+
+    function chipClass(state, verdict) {
+      if (verdict === "VERIFIED" || state === "closed") return "ok";
+      if (verdict === "REJECTED" || state === "rejected") return "bad";
+      return "wait";
+    }
+
+    async function loadApps() {
+      const listed = await api("/v1/applications");
+      const box = $("apps");
+      box.innerHTML = "";
+      (listed.applications || []).forEach((item) => {
+        const el = document.createElement("div");
+        el.className = "app";
+        el.textContent = (item.slug || item.id) + " · " + (item.repo || "");
+        box.appendChild(el);
+      });
+    }
+
+    async function loadCases() {
+      $("aside-err").textContent = "";
+      const listed = await api("/v1/cases");
+      const box = $("cases");
+      box.innerHTML = "";
+      (listed.cases || []).slice().reverse().forEach((item) => {
+        const btn = document.createElement("button");
+        btn.className = "case" + (item.id === selected ? " active" : "");
+        btn.textContent = (item.title || item.id) + " · " + (item.state || "");
+        btn.onclick = () => showCase(item.id);
+        box.appendChild(btn);
+      });
+      await loadApps();
+    }
+
+    async function showCase(id) {
+      selected = id;
+      $("empty").hidden = true;
+      $("detail").hidden = false;
+      $("detail-err").textContent = "";
+      const review = await api("/v1/cases/" + id + "/review");
+      currentReview = review;
+      const m = review.manifest || {};
+      const chips = $("chips");
+      chips.innerHTML = "";
+      [
+        ["state", m.state],
+        ["workload", m.workload],
+        ["gate", m.gate_verdict || "—"],
+        ["verified", m.verified_status || "—"],
+        ["surfaces", (m.gate_surfaces || []).join(",") || "—"],
+      ].forEach(([k, v]) => {
+        const el = document.createElement("span");
+        el.className = "chip " + chipClass(m.state, m.gate_verdict);
+        el.textContent = k + " " + v;
+        chips.appendChild(el);
+      });
+      const nxt = (m.next || [])[0];
+      $("next-box").textContent = nxt
+        ? "下一步：" + (nxt.code ? nxt.code + " · " : "") + (nxt.role || "") + " · " + (nxt.action || "")
+          + (nxt.skill ? " · " + nxt.skill : "")
+          + (nxt.reason ? "\n" + nxt.reason : "")
+          + ((nxt.missing || []).length ? "\nmissing: " + nxt.missing.join(", ") : "")
+        : "没有下一步。Case 已关闭或停住。";
+      const actions = $("actions");
+      actions.innerHTML = "";
+      if (nxt && nxt.action) {
+        const btn = document.createElement("button");
+        btn.className = "primary";
+        btn.textContent = "执行这一步";
+        btn.onclick = () => runNext(review);
+        actions.appendChild(btn);
+      }
+      const signal = review.signal || {};
+      $("signal-box").textContent = JSON.stringify({
+        title: signal.title,
+        source_ref: signal.source_ref,
+        body: signal.body,
+      }, null, 2);
+      const defaults = review.defaults || {};
+      const draft = review.acceptance_draft || {};
+      const spec = review.acceptance_spec;
+      $("accept-box").textContent = spec
+        ? JSON.stringify({ confirmed_by: spec.confirmed_by, confirmed_via: spec.confirmed_via, digest: spec.digest }, null, 2)
+        : JSON.stringify({ draft: draft, note: "草稿不是确认。" }, null, 2);
+      $("expected").value = spec ? spec.expected_behavior : (draft.expected_behavior || defaults.expected_behavior || "");
+      $("badcase").value = spec ? spec.badcase_input : (draft.badcase_input || defaults.badcase_input || "");
+      $("judge").value = spec ? spec.judge : (draft.judge || defaults.judge || "");
+      $("assurance-box").textContent = JSON.stringify(m.assurance || [], null, 2);
+      $("episode-box").textContent = JSON.stringify({
+        missing: m.episode_missing || [],
+        snapshot: review.episode_snapshot,
+      }, null, 2);
+      $("gate-box").textContent = JSON.stringify({
+        verdict: m.gate_verdict,
+        verified: m.verified_status,
+        surfaces: m.gate_surfaces,
+        reports: review.gate_reports,
+      }, null, 2);
+      $("work-box").textContent = JSON.stringify({
+        release_plans: review.release_plans,
+        work_orders: review.work_orders,
+        approvals: review.approvals,
+      }, null, 2);
+      $("shadow-box").textContent = JSON.stringify(review.operations || [], null, 2);
+      $("pr-box").textContent = m.pr_pack
+        ? "本地包已在 " + m.pr_pack + "。人确认后自己跑：agentmed pr submit " + m.case_id + " --i-am-human"
+        : "还没有生成。点下面按钮只写本地文件，不会开 PR。";
+      const surfaceChips = $("surface-chips");
+      surfaceChips.innerHTML = "";
+      (m.surface_results || []).forEach((row) => {
+        const el = document.createElement("span");
+        el.className = "chip " + (row.verified ? "ok" : "wait");
+        el.textContent = (row.surface || "?") + " " + (row.verified ? "verified" : "not verified");
+        surfaceChips.appendChild(el);
+      });
+      $("harness-patch").textContent = "还没有 harness.patch";
+      $("upstream-patch").textContent = "还没有 upstream.patch";
+      $("pr-manifest").textContent = "";
+      await loadCases();
+    }
+
+    async function runNext(review) {
+      const nxt = (review.next || [])[0];
+      if (!nxt) return;
+      $("detail-err").textContent = "";
+      try {
+        const action = nxt.action;
+        const principal = nxt.principal && nxt.principal !== "human:*" ? nxt.principal : "human:cli";
+        let body = {};
+        if (action.endsWith("/accept")) {
+          const expected = $("expected").value.trim();
+          const badcase = $("badcase").value.trim();
+          if (!expected || !badcase) throw new Error("NEEDS_ACCEPTANCE_CRITERIA：人必须确认验收，审查页不会代填。");
+          body = { expected_behavior: expected, badcase_input: badcase, judge: $("judge").value };
+        } else if (action.endsWith("/release") || action.endsWith("/shadow")) {
+          if (!window.confirm("这是本地 Shadow drill，不是生产发布。继续？")) return;
+        } else if (action.endsWith("/approvals")) {
+          const wo = (review.work_orders || []).slice(-1)[0] || {};
+          if (!wo.id) throw new Error("没有可批的 WorkOrder。");
+          if (!window.confirm("批准本地 Shadow 工单 " + wo.id + "？")) return;
+          body = { work_order_id: wo.id, decision: "approve" };
+        } else if (action.endsWith("/attribute")) {
+          body = { hypothesis: (review.defaults || {}).attribute_hypothesis };
+        } else if (action.endsWith("/close")) {
+          const defaults = review.defaults || {};
+          body = { summary: "closed from review console", probes: defaults.probes, lessons: defaults.lessons };
+        } else if (action.endsWith("/candidates")) {
+          throw new Error("Builder 必须改 allowed_files 后 POST files，审查页不代交对照补丁。");
+        }
+        const method = action.includes("/builder-context") ? "GET" : "POST";
+        await api(action, { method, principal, body: method === "POST" ? body : undefined });
+        await showCase(review.manifest.case_id);
+      } catch (err) {
+        $("detail-err").textContent = String(err.message || err);
+      }
+    }
+
+    $("confirm-accept").onclick = async () => {
+      if (!selected) return;
+      $("detail-err").textContent = "";
+      try {
+        const expected = $("expected").value.trim();
+        const badcase = $("badcase").value.trim();
+        if (!expected || !badcase) throw new Error("NEEDS_ACCEPTANCE_CRITERIA：人必须确认验收。");
+        await api("/v1/cases/" + selected + "/accept", {
+          method: "POST",
+          body: { expected_behavior: expected, badcase_input: badcase, judge: $("judge").value },
+        });
+        await showCase(selected);
+      } catch (err) {
+        $("detail-err").textContent = String(err.message || err);
+      }
+    };
+
+    $("approve-wo").onclick = async () => {
+      if (!selected || !currentReview) return;
+      $("detail-err").textContent = "";
+      try {
+        const wo = (currentReview.work_orders || []).slice(-1)[0] || {};
+        if (!wo.id) throw new Error("没有可批的 WorkOrder。先走 ReleasePlan 和 RELEASE_AUTHORIZATION。");
+        if (!window.confirm("批准本地 Shadow 工单？审查页不会执行 Shadow。")) return;
+        await api("/v1/cases/" + selected + "/approvals", {
+          method: "POST",
+          body: { work_order_id: wo.id, decision: "approve" },
+        });
+        await showCase(selected);
+      } catch (err) {
+        $("detail-err").textContent = String(err.message || err);
+      }
+    };
+
+    $("pr-pack").onclick = async () => {
+      if (!selected) return;
+      $("detail-err").textContent = "";
+      try {
+        const packed = await api("/v1/cases/" + selected + "/pr-pack");
+        const man = packed.manifest || {};
+        $("pr-box").textContent = (man.ready_to_submit
+          ? "Gate 已 VERIFIED / NOT DEPLOYED，且含 upstream surface。人看完补丁后自己跑命令。审查页不会代交。"
+          : "包已写出，但还不能交：需要 VERIFIED / NOT DEPLOYED 且 Gate 含 upstream。")
+          + "\n" + (man.dry_run_command || "")
+          + "\n" + (man.submit_command || "")
+          + "\n" + (packed.pack_dir || "");
+        $("pr-manifest").textContent = JSON.stringify(man, null, 2);
+        $("harness-patch").textContent = packed.harness_patch || "没有 harness.patch";
+        $("upstream-patch").textContent = packed.upstream_patch || "没有 upstream.patch";
+      } catch (err) {
+        $("detail-err").textContent = String(err.message || err);
+      }
+    };
+    $("refresh").onclick = () => loadCases().catch((err) => { $("aside-err").textContent = String(err.message || err); });
+    $("ingest").onclick = async () => {
+      $("aside-err").textContent = "";
+      try {
+        const body = { url: $("url").value };
+        if ($("slug").value.trim()) body.slug = $("slug").value.trim();
+        const out = await api("/v1/signals/ingest", { method: "POST", principal: "agent:intake", body });
+        await showCase(out.case.id);
+      } catch (err) {
+        $("aside-err").textContent = String(err.message || err);
+      }
+    };
+    loadCases().catch((err) => { $("aside-err").textContent = String(err.message || err); });
+  </script>
+</body>
+</html>

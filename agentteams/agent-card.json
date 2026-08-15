@@ -18,6 +18,20 @@
   },
   "defaultInputModes": ["application/json", "text/plain"],
   "defaultOutputModes": ["application/json"],
+  "gatewayIntents": [
+    "capabilities.get",
+    "signals.submit",
+    "cases.get",
+    "cases.timeline",
+    "candidates.submit",
+    "evidence.get",
+    "gate-reports.get"
+  ],
+  "forbiddenIntents": [
+    "approvals.decide",
+    "shadow.execute",
+    "release.execute"
+  ],
   "skills": [
     {
       "id": "report-quality-problem",

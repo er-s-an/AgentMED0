@@ -27,16 +27,31 @@ except urllib.error.URLError as exc:
 PY
   exit 0
 fi
-FILE="${2:?path to proposed lightrag_store.py required}"
-SUMMARY="${3:-store file_id on insert and filter query by selected file_ids}"
+FILE="${2:?path to a proposed file, directory, or files JSON}"
+SUMMARY="${3:-candidate from allowed_files}"
 python3 - "$KERNEL" "$PRINCIPAL" "$CASE_ID" "$FILE" "$SUMMARY" <<'PY'
 import json, sys, urllib.error, urllib.request
+from pathlib import Path
 
 kernel, principal, case_id, path, summary = sys.argv[1:]
-source = open(path, encoding="utf-8").read()
-body = json.dumps(
-    {"summary": summary, "lightrag_store_py": source, "diff": "see files", "risk": "low"}
-).encode()
+src = Path(path)
+files = {}
+if src.is_dir():
+    for item in src.rglob("*"):
+        if item.is_file():
+            files[str(item.relative_to(src))] = item.read_text(encoding="utf-8")
+elif src.suffix == ".json":
+    loaded = json.loads(src.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        sys.stderr.write("files JSON must be an object of {relative_path: contents}\n")
+        sys.exit(1)
+    files = {str(key): str(value) for key, value in loaded.items()}
+else:
+    files[src.name] = src.read_text(encoding="utf-8")
+payload = {"summary": summary, "files": files, "risk": "low"}
+if "lightrag_store.py" in files:
+    payload["lightrag_store_py"] = files["lightrag_store.py"]
+body = json.dumps(payload).encode()
 req = urllib.request.Request(
     f"{kernel}/v1/cases/{case_id}/candidates",
     data=body,

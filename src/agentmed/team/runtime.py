@@ -9,8 +9,10 @@ from typing import Any
 import httpx
 
 from agentmed.config import Settings
+from agentmed.kernel import Kernel
 from agentmed.live import LiveStackError
-from agentmed.workload import DEFAULT_BADCASE, DEFAULT_EXPECTED, DEFAULT_JUDGE
+from agentmed.review import case_manifest
+from agentmed.store import Store
 
 
 def _kernel(settings: Settings) -> str:
@@ -34,6 +36,7 @@ def wait_for_case(
     accept: bool,
     timeout_s: int,
     since_ts: float | None = None,
+    accept_body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     base = _kernel(settings)
     started = since_ts if since_ts is not None else time.time()
@@ -59,20 +62,21 @@ def wait_for_case(
                     if state and state != last_state:
                         print(f"kernel_state={state} case_id={case_id}", flush=True)
                         last_state = state
-                    if accept and not accepted and state == "awaiting_acceptance":
+                    if accept and accept_body and not accepted and state == "awaiting_acceptance":
                         client.post(
                             f"{base}/v1/cases/{case_id}/accept",
                             headers={"X-AgentMED-Principal": "human:cli"},
-                            json={
-                                "expected_behavior": DEFAULT_EXPECTED,
-                                "badcase_input": DEFAULT_BADCASE,
-                                "judge": DEFAULT_JUDGE,
-                            },
+                            json=accept_body,
                         ).raise_for_status()
                         accepted = True
                         time.sleep(1)
                         continue
                     if state == "closed":
+                        kernel = Kernel(Store(settings.database_url, Path(settings.agentmed_data_dir)))
+                        manifest = case_manifest(kernel, case_id, data_dir=Path(settings.agentmed_data_dir))
+                        shown = dict(manifest)
+                        shown.pop("patch_text", None)
+                        bundle["manifest"] = shown
                         export_dir = Path(settings.agentmed_data_dir) / "exports"
                         export_dir.mkdir(parents=True, exist_ok=True)
                         path = export_dir / f"{case_id}.json"

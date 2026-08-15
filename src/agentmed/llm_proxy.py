@@ -19,6 +19,7 @@ ROLE_MARKERS = (
     "curator",
     "intake",
     "manager",
+    "target_app",
 )
 _SECRET_RE = re.compile(
     r"(?i)(sk-lf-[A-Za-z0-9_-]+|pk-lf-[A-Za-z0-9_-]+|sk-[A-Za-z0-9]{16,}|Bearer\s+\S+)"
@@ -74,6 +75,12 @@ def infer_role(messages: list[Any], headers: dict[str, str] | None = None) -> st
         return "manager"
     if "agentmed (product loop)" in lowered:
         return "manager"
+    ua = headers.get("user-agent", "").lower()
+    if "openclaw" in ua or headers.get("x-openclaw"):
+        return "target_app"
+    auth = headers.get("authorization", "").lower()
+    if "agentmed-kernel-proxy" in auth:
+        return "target_app"
     return "unknown"
 
 
@@ -95,9 +102,16 @@ def log_generation(
     output: Any,
     usage: dict[str, Any] | None = None,
     source: str = "kernel_llm_proxy",
+    case_id: str | None = None,
 ) -> None:
     settings = load_settings()
+    from agentmed.langfuse_bus import resolve_prompt
+
+    resolved = resolve_prompt(settings, role)
     obs = Observability(settings)
+    tags = ["agentmed-governance", "agentmed", role]
+    if case_id:
+        tags.append(case_id)
     obs.generation(
         name=f"agentmed.{role}.llm",
         model=model,
@@ -109,8 +123,12 @@ def log_generation(
             "product": "agentmed",
             "plane": "governance",
             "source": source,
+            "case_id": case_id,
+            "prompt_name": resolved.get("name"),
+            "prompt_version": resolved.get("version"),
+            "prompt_source": resolved.get("source"),
         },
-        tags=["agentmed-governance", "agentmed", role],
+        tags=tags,
     )
     obs.flush()
 
@@ -165,6 +183,8 @@ def proxy_chat(payload: dict[str, Any], headers: dict[str, str] | None = None) -
         )
     messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
     role = infer_role(messages, headers)
+    header_map = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+    case_id = header_map.get("x-agentmed-case-id") or None
     model = str(payload.get("model") or settings.agentmed_model)
     upstream_headers = {
         "Authorization": f"Bearer {settings.openai_api_key}",
@@ -190,6 +210,7 @@ def proxy_chat(payload: dict[str, Any], headers: dict[str, str] | None = None) -
                         messages=messages,
                         output=_content_from_sse(raw) or raw.decode("utf-8", errors="replace")[:8000],
                         source="kernel_llm_proxy",
+                        case_id=case_id,
                     )
                 except Exception:
                     pass
@@ -221,6 +242,7 @@ def proxy_chat(payload: dict[str, Any], headers: dict[str, str] | None = None) -
             output=output,
             usage=_usage(body) if isinstance(body, dict) else {},
             source="kernel_llm_proxy",
+            case_id=case_id,
         )
     return JSONResponse(body, status_code=response.status_code)
 

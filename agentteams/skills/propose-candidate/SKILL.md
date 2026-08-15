@@ -1,6 +1,6 @@
 ---
 name: propose-candidate
-description: Fetch builder-context, write a full lightrag_store.py that scopes chunks by file_id, then submit with scripts/run.sh. Do not self-verify.
+description: Fetch builder-context, edit only allowed_files, then submit files with scripts/run.sh. Do not self-verify.
 assign_when: Case is proposing and only agent:builder may emit a candidate.
 ---
 
@@ -9,13 +9,13 @@ assign_when: Case is proposing and only agent:builder may emit a candidate.
 ## 输入
 
 - `$CASE_ID`
-- 提交时：完整 `lightrag_store.py` 路径 + 可选 summary
+- 提交时：一个文件、目录、或 `{相对路径: 全文}` JSON + 可选 summary
 - Principal：`agent:builder`
-- Kernel `GET /v1/cases/{id}/builder-context` 给出的 AcceptanceSpec + 基线源码
+- Kernel `GET /v1/cases/{id}/builder-context` 给出的 AcceptanceSpec、`files`、`allowed_files`、`instruction`
 
 ## 输出
 
-- 仅 context：buggy source + spec + 指令
+- 仅 context：基线文件 + spec + 指令
 - 提交后：密封 `CandidateRevision` JSON（`id` / digest）。此后不可原地改
 
 ## 调用条件
@@ -25,7 +25,8 @@ Case `proposing`。只有 `agent:builder` 可提交。REJECT 后开**新** revis
 ## 依赖
 
 - `GET .../builder-context` 与 `POST .../candidates`
-- 行为约束：`insert` 必须持久化 `file_id`；`query(file_ids=...)` 只返回匹配 chunk；空选择返回 `[]`
+- 只改 `allowed_files`。多交的文件 Kernel 会 400
+- 行为约束以 `instruction` 为准，不要假设一定是 `lightrag_store.py`
 
 ## 失败处理
 
@@ -48,12 +49,12 @@ Case `proposing`。只有 `agent:builder` 可提交。REJECT 后开**新** revis
 
 ```bash
 bash scripts/run.sh "$CASE_ID"
-# then write /tmp/lightrag_store.py and:
-bash scripts/run.sh "$CASE_ID" /tmp/lightrag_store.py "persist file_id and filter query"
+# then write the allowed file(s) and:
+bash scripts/run.sh "$CASE_ID" /tmp/allowed-file.py "minimal fix"
 ```
 
 ```bash
 bash /root/.copaw-worker/builder/skills/propose-candidate/scripts/run.sh "$CASE_ID"
 bash /root/.copaw-worker/builder/skills/propose-candidate/scripts/run.sh \
-  "$CASE_ID" /tmp/lightrag_store.py "persist file_id and filter query"
+  "$CASE_ID" /tmp/allowed-file.py "minimal fix"
 ```
