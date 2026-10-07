@@ -115,13 +115,29 @@ def _copy_skill_into_worker(worker: str, skill: str) -> str:
 
 
 def sync_worker_skills(settings: Settings) -> dict[str, Any]:
-    """Copy Kernel skill scripts into running Copaw workspaces."""
+    """Persist Kernel skills for Workers without requiring them to be awake."""
     del settings
     docker = _docker()
     installed: list[str] = []
     for worker, skills in WORKER_SKILLS.items():
-        for skill in skills:
-            installed.append(_copy_skill_into_worker(worker, skill))
+        pushed = _run(
+            [
+                docker,
+                "exec",
+                "agentteams-manager",
+                "bash",
+                PUSH_SCRIPT,
+                "--worker",
+                worker,
+                "--no-notify",
+            ],
+            check=False,
+            timeout=120,
+        )
+        if pushed.returncode != 0:
+            detail = (pushed.stderr or pushed.stdout).strip()
+            raise LiveStackError(f"persistent skill push failed for {worker}: {detail}")
+        installed.extend(f"agentteams-storage:{worker}/skills/{skill}" for skill in skills)
     try:
         peer = _run(
             [
